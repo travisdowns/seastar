@@ -87,7 +87,7 @@ struct request {
     std::unordered_map<sstring, sstring> trailing_headers;
     std::unordered_map<sstring, sstring> chunk_extensions;
     sstring protocol_name = "http";
-
+    int listener_idx;
     /**
      * Search for the first header of a given name
      * @param name the header name
@@ -135,6 +135,13 @@ struct request {
 
     bool is_form_post() const {
         return content_type_class == ctclass::app_x_www_urlencoded;
+    }
+    /**
+     * Get index of listener which accepted connection receiving this request
+     * @return position of listener in server _listeners vector
+     */
+    int get_listener_idx() const {
+        return listener_idx;
     }
 
     bool should_keep_alive() const {
