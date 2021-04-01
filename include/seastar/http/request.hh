@@ -81,6 +81,7 @@ struct request {
     std::unordered_map<sstring, sstring> chunk_extensions;
     sstring protocol_name = "http";
     http::body_writer_type body_writer; // for client
+    int listener_idx;
 
     using query_parameters_type = std::unordered_map<sstring, std::vector<sstring>, seastar::internal::string_view_hash, std::equal_to<>>;
 private:
@@ -242,6 +243,13 @@ public:
 
     bool is_form_post() const {
         return content_type_class == ctclass::app_x_www_urlencoded;
+    }
+    /**
+     * Get index of listener which accepted connection receiving this request
+     * @return position of listener in server _listeners vector
+     */
+    int get_listener_idx() const {
+        return listener_idx;
     }
 
     bool should_keep_alive() const {
