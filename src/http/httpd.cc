@@ -212,6 +212,7 @@ future<> connection::read_one() {
 
         req->_server_address = this->_server_addr;
         req->_client_address = this->_client_addr;
+        req->listener_idx = _listener_idx;
 
         if (_tls) {
             req->protocol_name = "https";
@@ -506,18 +507,18 @@ future<> http_server::do_accept_one(int which, bool tls) {
     // lambda would be destroyed while its frame is still running.
     (void)try_with_gate(_task_gate,
             [this, conn_fd = std::move(ar.connection),
-             remote_address = std::move(ar.remote_address), tls]() mutable {
-        return do_process_connection(std::move(conn_fd), std::move(remote_address), tls);
+             remote_address = std::move(ar.remote_address), tls, which]() mutable {
+        return do_process_connection(std::move(conn_fd), std::move(remote_address), tls, which);
     }).handle_exception_type([] (const gate_closed_exception& e) {});
 }
 
 // Named member coroutine for per-connection processing, called from the
 // non-coroutine lambda in try_with_gate inside do_accept_one(). Parameters
 // are passed by value so they live safely in the coroutine frame.
-future<> http_server::do_process_connection(connected_socket conn_fd, socket_address remote_address, bool tls) {
+future<> http_server::do_process_connection(connected_socket conn_fd, socket_address remote_address, bool tls, int listener_idx) {
     auto local_address = conn_fd.local_address();
     auto conn = std::make_unique<connection>(*this, std::move(conn_fd),
-            std::move(remote_address), std::move(local_address), tls);
+            std::move(remote_address), std::move(local_address), tls, listener_idx);
     try {
         co_await conn->prepare();
     } catch (...) {
