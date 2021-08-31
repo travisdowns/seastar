@@ -81,14 +81,17 @@ std::ostream& operator<<(std::ostream& os, fair_queue_ticket t) {
     return os << t._weight << ":" << t._size;
 }
 
-fair_group_rover::fair_group_rover(uint32_t weight, uint32_t size) noexcept
+fair_group_rover::fair_group_rover(uint64_t weight, uint64_t size) noexcept
         : _weight(weight)
         , _size(size)
 {}
 
 fair_queue_ticket fair_group_rover::maybe_ahead_of(const fair_group_rover& other) const noexcept {
-    return fair_queue_ticket(std::max<int32_t>(_weight - other._weight, 0),
-            std::max<int32_t>(_size - other._size, 0));
+
+    uint64_t weight_d = std::clamp<int64_t>(_weight - other._weight, 0, std::numeric_limits<int32_t>::max());
+    uint64_t size_d = std::clamp<int64_t>(_size - other._size, 0, std::numeric_limits<int32_t>::max());
+
+    return fair_queue_ticket(weight_d, size_d);
 }
 
 fair_group_rover fair_group_rover::operator+(fair_queue_ticket t) const noexcept {
