@@ -77,7 +77,12 @@ std::unique_ptr<http::reply> routes::exception_reply(std::exception_ptr eptr) {
     } catch (const redirect_exception& _e) {
       *rep = _e.to_reply();
     } catch (const base_exception& e) {
-        rep->set_status(e.status(), internal::to_json(e));
+        if (e.content_type().size()) {
+            rep->set_status(e.status(), e.str());
+            rep->set_content_type(e.content_type());
+        } else {
+            rep->set_status(e.status(), internal::to_json(e));
+        }
     } catch (...) {
         rep->set_status(http::reply::status_type::internal_server_error,
                 internal::to_json(std::current_exception()));
