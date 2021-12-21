@@ -123,7 +123,7 @@ public:
     static sstring set_query_param(request& req);
 
     future<bool> generate_reply(std::unique_ptr<request> req);
-    void generate_error_reply_and_close(std::unique_ptr<request> req, reply::status_type status, const sstring& msg);
+    void generate_error_reply_and_close(std::unique_ptr<request> req, reply::status_type status, const sstring& msg, const sstring &content_type={});
 
     future<> write_body();
 
