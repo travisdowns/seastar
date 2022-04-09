@@ -92,13 +92,16 @@ class BacktraceResolver(object):
 
         def __init__(self):
             addr = "0x[0-9a-f]+"
-            path = "\S+"
-            token = f"(?:{path}\+)?{addr}"
-            full_addr_match = f"(?:({path})\+)?({addr})"
-            self.oneline_re = re.compile(f"^((?:.*(?:(?:at|backtrace):?|:))?(?:\s+))?({token}(?:\s+{token})*)(?:\).*|\s*)$", flags=re.IGNORECASE)
+            path = r"\S+"
+            token = fr"(?:{path}\+)?{addr}"
+            full_addr_match = fr"(?:({path})\+)?({addr})"
+            self.oneline_re = re.compile(
+                fr"^((?:.*(?:(?:at|backtrace):?|:))?(?:\s+))?({token}(?:\s+{token})*)(?:\).*|\s*)$",
+                flags=re.IGNORECASE)
             self.address_re = re.compile(full_addr_match, flags=re.IGNORECASE)
-            self.asan_re = re.compile(f"^(?:.*\s+)\(({full_addr_match})\)\s*$", flags=re.IGNORECASE)
-            self.separator_re = re.compile('^\W*-+\W*$')
+            self.asan_re = re.compile(
+                fr"^(?:.*\s+)\(({full_addr_match})\)\s*$", flags=re.IGNORECASE)
+            self.separator_re = re.compile(r'^\W*-+\W*$')
 
         def __call__(self, line):
             def get_prefix(s):
@@ -252,4 +255,3 @@ class BacktraceResolver(object):
         else:
             print(f"Unknown '{line}': {res}")
             raise RuntimeError("Unknown result type {res}")
-
