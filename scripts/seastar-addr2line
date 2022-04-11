@@ -213,7 +213,24 @@ if args.test:
         ('[2022-04-19T23:09:28.311Z]   0x461bbb8',
                 {'type': BacktraceResolver.BacktraceParser.Type.ADDRESS, 'prefix': None, 'addresses': [{'path': None, 'addr': '0x461bbb8'}]}),
         ('[2022-04-19T23:09:28.311Z]   /lib64/libpthread.so.0+0x92a4',
-                {'type': BacktraceResolver.BacktraceParser.Type.ADDRESS, 'prefix': None, 'addresses': [{'path': '/lib64/libpthread.so.0', 'addr': '0x92a4'}]})
+                {'type': BacktraceResolver.BacktraceParser.Type.ADDRESS, 'prefix': None, 'addresses': [{'path': '/lib64/libpthread.so.0', 'addr': '0x92a4'}]}),
+
+        ('kernel callstack: ', None),
+        ('kernel callstack: 0xffffffffffffff80',
+            {
+                'type': BacktraceResolver.BacktraceParser.Type.ADDRESS,
+                'prefix': 'kernel callstack: ',
+                'addresses': [{'path': '<kernel>', 'addr': '0xffffffffffffff80'}]
+            }
+        ),
+        ('kernel callstack: 0xffffffffffffff80 0xffffffffaf15ccca',
+            {
+                'type': BacktraceResolver.BacktraceParser.Type.ADDRESS,
+                'prefix': 'kernel callstack: ',
+                'addresses': [{'path': '<kernel>', 'addr': '0xffffffffffffff80'}, {'path': '<kernel>', 'addr': '0xffffffffaf15ccca'}]
+            }
+        )
+
     ]
     parser = BacktraceResolver.BacktraceParser()
     for line, expected in data:
