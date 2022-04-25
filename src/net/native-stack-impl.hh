@@ -103,6 +103,7 @@ public:
     keepalive_params get_keepalive_parameters() const override;
     int get_sockopt(int level, int optname, void* data, size_t len) const override;
     void set_sockopt(int level, int optname, const void* data, size_t len) override;
+    future<std::optional<session_dn>> get_distinguished_name() override;
 };
 
 template <typename Protocol>
@@ -262,6 +263,11 @@ void native_connected_socket_impl<Protocol>::set_sockopt(int level, int optname,
 template<typename Protocol>
 int native_connected_socket_impl<Protocol>::get_sockopt(int level, int optname, void* data, size_t len) const {
     throw std::runtime_error("Getting custom socket options is not supported for native stack");
+}
+
+template<typename Protocol>
+future<std::optional<session_dn>> native_connected_socket_impl<Protocol>::get_distinguished_name() {
+    return make_ready_future<std::optional<session_dn>>(std::nullopt);
 }
 
 }
