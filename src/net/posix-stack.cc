@@ -248,6 +248,9 @@ public:
     int get_sockopt(int level, int optname, void* data, size_t len) const override {
         return _ops->get_sockopt(_fd.get_file_desc(), level, optname, data, len);
     }
+    future<std::optional<session_dn>> get_distinguished_name() override {
+        return make_ready_future<std::optional<session_dn>>(std::nullopt);
+    }
     friend class posix_server_socket_impl;
     friend class posix_ap_server_socket_impl;
     friend class posix_reuseport_server_socket_impl;

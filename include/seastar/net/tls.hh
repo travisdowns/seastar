@@ -327,7 +327,7 @@ namespace tls {
     /** Wraps an existing connection in SSL/TLS. */
     /// @{
     future<connected_socket> wrap_client(shared_ptr<certificate_credentials>, connected_socket&&, sstring name = {});
-    future<connected_socket> wrap_server(shared_ptr<server_credentials>, connected_socket&&);
+    future<connected_socket> wrap_server(shared_ptr<server_credentials>, connected_socket&&, bool enable_dn_fetch = false);
     /// @}
 
     /**
@@ -337,9 +337,9 @@ namespace tls {
      * for the server and optionally trust/crl data.
      */
     /// @{
-    server_socket listen(shared_ptr<server_credentials>, socket_address sa, listen_options opts = listen_options());
+    server_socket listen(shared_ptr<server_credentials>, socket_address sa, listen_options opts = listen_options(), bool enable_dn_fetch = false);
     // Wraps an existing server socket in SSL
-    server_socket listen(shared_ptr<server_credentials>, server_socket);
+    server_socket listen(shared_ptr<server_credentials>, server_socket, bool enable_dn_fetch = false);
     /// @}
 }
 }

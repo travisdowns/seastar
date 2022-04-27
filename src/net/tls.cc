@@ -22,6 +22,7 @@
 #include <gnutls/gnutls.h>
 #include <gnutls/x509.h>
 #include <system_error>
+#include <variant>
 
 #include <seastar/core/loop.hh>
 #include <seastar/core/reactor.hh>
@@ -972,7 +973,7 @@ public:
     };
 
     session(type t, shared_ptr<tls::certificate_credentials> creds,
-            std::unique_ptr<net::connected_socket_impl> sock, sstring name = { })
+            std::unique_ptr<net::connected_socket_impl> sock, sstring name = { }, bool enable_dn_fetch = false)
             : _type(t), _sock(std::move(sock)), _creds(creds->_impl), _hostname(
                     std::move(name)), _in(_sock->source()), _out(_sock->sink()),
                     _in_sem(1), _out_sem(1), _output_pending(
@@ -998,6 +999,11 @@ public:
                     gnutls_certificate_server_set_request(*this, GNUTLS_CERT_REQUIRE);
                     break;
             }
+            if (_creds->get_client_auth() != client_auth::NONE) {
+                if (enable_dn_fetch) {
+                    _session_dn = std::make_unique<promise<std::optional<session_dn>>>();
+                }
+            }
         }
 
         auto prio = _creds->get_priority();
@@ -1018,9 +1024,9 @@ public:
 #endif
     }
     session(type t, shared_ptr<certificate_credentials> creds,
-            connected_socket sock, sstring name = { })
+            connected_socket sock, sstring name = { }, bool enable_dn_fetch = false)
             : session(t, std::move(creds), net::get_impl::get(std::move(sock)),
-                    std::move(name)) {
+                    std::move(name), enable_dn_fetch) {
     }
 
     ~session() {
@@ -1184,21 +1190,31 @@ public:
     }
 
     void verify() {
+        bool fetch_dn = static_cast<bool>(_session_dn);
         unsigned int status;
         auto res = gnutls_certificate_verify_peers3(*this, _type != type::CLIENT || _hostname.empty()
                         ? nullptr : _hostname.c_str(), &status);
         if (res == GNUTLS_E_NO_CERTIFICATE_FOUND && _type != type::CLIENT && _creds->get_client_auth() != client_auth::REQUIRE) {
+            if (fetch_dn) {
+                _session_dn->set_value(std::nullopt);
+            }
             return;
         }
         if (res < 0) {
+            if (fetch_dn) {
+                _session_dn->set_value(std::nullopt);
+            }
             throw std::system_error(res, glts_errorc);
         }
         if (status & GNUTLS_CERT_INVALID) {
+            if (fetch_dn) {
+                _session_dn->set_value(std::nullopt);
+            }
             throw verification_error(
                     cert_status_to_string(gnutls_certificate_type_get(*this),
                             status));
         }
-        if (_creds->_dn_callback) {
+        if (fetch_dn || _creds->_dn_callback) {
             // if the user registered a DN (Distinguished Name) callback
             // then extract subject and issuer from the (leaf) peer certificate and invoke the callback
 
@@ -1217,6 +1233,9 @@ public:
             gnutls_x509_crt_deinit(peer_leaf_cert);
 
             if (ec || ec2) {
+                if (fetch_dn) {
+                    _session_dn->set_value(std::nullopt);
+                }
                 throw std::runtime_error("error while extracting certificate DN strings");
             }
 
@@ -1232,7 +1251,12 @@ public:
                 break;
             }
 
-            _creds->_dn_callback(t, std::move(subject), std::move(issuer));
+            if (_creds->_dn_callback) {
+                _creds->_dn_callback(t, subject, issuer);
+            }
+            if (fetch_dn) {
+                _session_dn->set_value(session_dn{.subject=std::move(subject), .issuer=std::move(issuer)});
+            }
         }
     }
 
@@ -1437,7 +1461,7 @@ public:
                 if (eof()) {
                     return make_ready_future<stop_iteration>(stop_iteration::yes);
                 }
-                return do_get().then([](auto buf) {
+                return do_get().then([](auto) {
                    return make_ready_future<stop_iteration>(stop_iteration::no);
                 });
             });
@@ -1497,6 +1521,13 @@ public:
         return *_sock;
     }
 
+    future<std::optional<session_dn>> get_distinguished_name() {
+        if (_session_dn) {
+            return _session_dn->get_future();
+        }
+        return make_ready_future<std::optional<session_dn>>(std::nullopt);
+    }
+
     struct session_ref;
 private:
     type _type;
@@ -1519,6 +1550,7 @@ private:
 
     // modify this to a unique_ptr to handle exceptions in our constructor.
     std::unique_ptr<std::remove_pointer_t<gnutls_session_t>, void(*)(gnutls_session_t)> _session;
+    std::unique_ptr<promise<std::optional<session_dn>>> _session_dn;
 };
 
 struct session::session_ref {
@@ -1586,6 +1618,9 @@ public:
     int get_sockopt(int level, int optname, void* data, size_t len) const override {
         return _session->socket().get_sockopt(level, optname, data, len);
     }
+    future<std::optional<session_dn>> get_distinguished_name() override {
+        return _session->get_distinguished_name();
+    }
 };
 
 
@@ -1625,15 +1660,15 @@ private:
 
 class server_session : public net::server_socket_impl {
 public:
-    server_session(shared_ptr<server_credentials> creds, server_socket sock)
-            : _creds(std::move(creds)), _sock(std::move(sock)) {
+    server_session(shared_ptr<server_credentials> creds, server_socket sock, bool enable_dn_fetch)
+            : _creds(std::move(creds)), _sock(std::move(sock)), _enable_dn_fetch(enable_dn_fetch) {
     }
     future<accept_result> accept() override {
         // We're not actually doing anything very SSL until we get
         // an actual connection. Then we create a "server" session
         // and wrap it up after handshaking.
         return _sock.accept().then([this](accept_result ar) {
-            return wrap_server(_creds, std::move(ar.connection)).then([addr = std::move(ar.remote_address)](connected_socket s) {
+            return wrap_server(_creds, std::move(ar.connection), _enable_dn_fetch).then([addr = std::move(ar.remote_address)](connected_socket s) {
                 return make_ready_future<accept_result>(accept_result{std::move(s), addr});
             });
         });
@@ -1645,8 +1680,10 @@ public:
         return _sock.local_address();
     }
 private:
+
     shared_ptr<server_credentials> _creds;
     server_socket _sock;
+    bool _enable_dn_fetch;
 };
 
 class tls_socket_impl : public net::socket_impl {
@@ -1706,18 +1743,18 @@ future<connected_socket> tls::wrap_client(shared_ptr<certificate_credentials> cr
     return make_ready_future<connected_socket>(std::move(sock));
 }
 
-future<connected_socket> tls::wrap_server(shared_ptr<server_credentials> cred, connected_socket&& s) {
-    session::session_ref sess(make_lw_shared<session>(session::type::SERVER, std::move(cred), std::move(s)));
+future<connected_socket> tls::wrap_server(shared_ptr<server_credentials> cred, connected_socket&& s, bool enable_dn_fetch) {
+    session::session_ref sess(make_lw_shared<session>(session::type::SERVER, std::move(cred), std::move(s), sstring(), enable_dn_fetch));
     connected_socket sock(std::make_unique<tls_connected_socket_impl>(std::move(sess)));
     return make_ready_future<connected_socket>(std::move(sock));
 }
 
-server_socket tls::listen(shared_ptr<server_credentials> creds, socket_address sa, listen_options opts) {
-    return listen(std::move(creds), seastar::listen(sa, opts));
+server_socket tls::listen(shared_ptr<server_credentials> creds, socket_address sa, listen_options opts, bool enable_dn_fetch) {
+    return listen(std::move(creds), seastar::listen(sa, opts), enable_dn_fetch);
 }
 
-server_socket tls::listen(shared_ptr<server_credentials> creds, server_socket ss) {
-    server_socket ssls(std::make_unique<server_session>(creds, std::move(ss)));
+server_socket tls::listen(shared_ptr<server_credentials> creds, server_socket ss, bool enable_dn_fetch) {
+    server_socket ssls(std::make_unique<server_session>(creds, std::move(ss), enable_dn_fetch));
     return server_socket(std::move(ssls));
 }
 

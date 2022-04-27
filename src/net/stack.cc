@@ -137,6 +137,10 @@ void connected_socket::shutdown_input() {
     _csi->shutdown_input();
 }
 
+future<std::optional<session_dn>> connected_socket::get_distinguished_name() {
+    return _csi->get_distinguished_name();
+}
+
 data_source
 net::connected_socket_impl::source(connected_socket_input_stream_config csisc) {
     // Default implementation falls back to non-parameterized data_source

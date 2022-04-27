@@ -157,6 +157,12 @@ struct connected_socket_input_stream_config final {
     unsigned max_buffer_size = 128 * 1024;
 };
 
+/// Distinguished name
+struct session_dn {
+    sstring subject;
+    sstring issuer;
+};
+
 /// A TCP (or other stream-based protocol) connection.
 ///
 /// A \c connected_socket represents a full-duplex stream between
@@ -224,6 +230,12 @@ public:
     /// This is useful to abort operations on a socket that is not making
     /// progress due to a peer failure.
     void shutdown_input();
+
+    /// Returns DN from client certificate
+    ///
+    /// The value can only be returned by the server socket and
+    /// only in case if the client authentication is enabled.
+    future<std::optional<session_dn>> get_distinguished_name();
 };
 /// @}
 

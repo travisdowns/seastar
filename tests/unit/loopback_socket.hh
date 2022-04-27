@@ -184,6 +184,9 @@ public:
     int get_sockopt(int level, int optname, void* data, size_t len) const override {
         throw std::runtime_error("Getting custom socket options is not supported for loopback");
     }
+    future<std::optional<session_dn>> get_distinguished_name() {
+        throw std::runtime_error("Getting distinguished name is not supported for loopback");
+    }
 };
 
 class loopback_server_socket_impl : public net::server_socket_impl {
