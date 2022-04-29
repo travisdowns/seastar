@@ -261,6 +261,8 @@ logger::rate_limit::rate_limit(std::chrono::milliseconds interval)
     : _interval(interval), _next(clock::now())
 { }
 
+static thread_local long seq_number = 0;
+
 void
 logger::do_log(log_level level, log_writer& writer) {
     bool is_ostream_enabled = _ostream.load(std::memory_order_relaxed);
@@ -277,7 +279,7 @@ logger::do_log(log_level level, log_writer& writer) {
     };
     auto print_once = [&] (internal::log_buf::inserter_iterator it) {
       if (local_engine) {
-          it = fmt::format_to(it, " [shard {}]", this_shard_id());
+          it = fmt::format_to(it, " [shard {} seq {}]", this_shard_id(), seq_number++);
       }
       it = fmt::format_to(it, " {} - ", _name);
       return writer(it);
