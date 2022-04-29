@@ -195,8 +195,8 @@ static internal::log_buf::inserter_iterator print_real_timestamp(internal::log_b
         this_second.s = fmt::format("{:%Y-%m-%d %T}", fmt::localtime(t));
         this_second.t = t;
     }
-    auto ms = (n - clock::from_time_t(t)) / 1ms;
-    return fmt::format_to(it, "{},{:03d}", this_second.s, ms);
+    auto us = (n - clock::from_time_t(t)) / 1us;
+    return fmt::format_to(it, "{},{:06d}", this_second.s, us);
 }
 
 static internal::log_buf::inserter_iterator (*print_timestamp)(internal::log_buf::inserter_iterator) = print_no_timestamp;
