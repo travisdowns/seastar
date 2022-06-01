@@ -41,15 +41,9 @@ def debug(*dargs: Any):
 
 class Addr2Line:
 
-    # Matcher for a line that appears at the end a single decoded
-    # address, which we force by adding a dummy 0x0 address. The
-    # pattern varies between binutils addr2line and llvm-addr2line
-    # so we match both.
-    dummy_pattern = re.compile(
-        r"(.*0x0000000000000000: \?\? \?\?:0\n)" # addr2line pattern
-        r"|"
-        r"(.*0x0: \?\? at \?\?:0\n)"  # llvm-addr2line pattern
-        )
+    # A sentinel that we add after every decoded address, and which
+    # addr2line simply echos unchanged.
+    sentinel = '$sentinel$'
 
     def __init__(self, binary, concise=False, cmd_path="addr2line"):
         self._binary = binary
@@ -79,11 +73,9 @@ class Addr2Line:
         self._missing = res == ''
 
     def _read_resolved_address(self):
-        res = self._output.stdout.readline()
-        # remove the address
-        res = res.split(': ', 1)[1]
-        line = ''
-        while Addr2Line.dummy_pattern.fullmatch(line) is None:
+        res = ''
+        line = self._output.stdout.readline().split(': ', 1)[1]
+        while line.strip() != Addr2Line.sentinel:
             debug('From addr2line:', line)
             res += line
             line = self._output.stdout.readline()
@@ -93,7 +85,7 @@ class Addr2Line:
     def __call__(self, address):
         if self._missing:
             return " ".join([self._binary, address, '\n'])
-        instr = address + '\n0x0\n'
+        instr = f'{address}\n{Addr2Line.sentinel}\n'
         debug('To addr2line: ' + instr)
         # We print a dummy 0x0 address after the address we are interested in
         # which we can look for in _read_address
