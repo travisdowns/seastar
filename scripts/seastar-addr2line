@@ -205,14 +205,14 @@ if args.test:
         ('kernel callstack: ', None),
         ('kernel callstack: 0xffffffffffffff80',
             {
-                'type': BacktraceResolver.BacktraceParser.Type.KERNEL_ADDRESS,
+                'type': BacktraceResolver.BacktraceParser.Type.ADDRESS,
                 'prefix': 'kernel callstack: ',
                 'addresses': [{'path': '<kernel>', 'addr': '0xffffffffffffff80'}]
             }
         ),
         ('kernel callstack: 0xffffffffffffff80 0xffffffffaf15ccca',
             {
-                'type': BacktraceResolver.BacktraceParser.Type.KERNEL_ADDRESS,
+                'type': BacktraceResolver.BacktraceParser.Type.ADDRESS,
                 'prefix': 'kernel callstack: ',
                 'addresses': [{'path': '<kernel>', 'addr': '0xffffffffffffff80'}, {'path': '<kernel>', 'addr': '0xffffffffaf15ccca'}]
             }
