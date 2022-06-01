@@ -561,17 +561,15 @@ public:
     /** @} */
 };
 
-static future<metrics_families_per_shard> get_map_value() {
-    metrics_families_per_shard vec;
+static future<> get_map_value(metrics_families_per_shard& vec, int handle) {
     vec.resize(this_smp_shard_count());
-    co_await parallel_for_each(std::views::iota(0u, this_smp_shard_count()), [&vec] (auto cpu) {
-        return smp::submit_to(cpu, [] {
-            return mi::get_values();
+    co_await parallel_for_each(std::views::iota(0u, this_smp_shard_count()), [handle, &vec] (auto cpu) {
+        return smp::submit_to(cpu, [handle] {
+            return mi::get_values(handle);
         }).then([&vec, cpu] (auto res) {
             vec[cpu] = std::move(res);
         });
     });
-    co_return vec;
 }
 
 /*!
@@ -1111,7 +1109,8 @@ private:
 
     future<> write_body(write_body_args args, output_stream<char>&& out_stream) {
         auto s = std::move(out_stream);
-        auto families = co_await get_map_value();
+        metrics_families_per_shard families;
+        co_await get_map_value(families, _ctx.handle);
         bool use_protobuf = args.use_protobuf_format;
 
         write_context context{
@@ -1138,7 +1137,7 @@ std::function<bool(const mi::labels_type&)> metrics_handler::_true_function = []
 };
 
 future<> add_prometheus_routes(httpd::http_server& server, config ctx) {
-    server._routes.put(httpd::GET, "/metrics", new metrics_handler(ctx));
+    server._routes.put(httpd::GET, ctx.route, new metrics_handler(ctx));
     return make_ready_future<>();
 }
 
