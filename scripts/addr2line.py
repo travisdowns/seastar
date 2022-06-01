@@ -29,6 +29,16 @@ from typing import Any
 # special binary path/module indicating that the address is from the kernel
 KERNEL_MODULE = '<kernel>'
 
+_debug_on = False
+
+def set_debug(debug_on:bool):
+    global _debug_on
+    _debug_on = debug_on
+
+def debug(*dargs: Any):
+    if _debug_on:
+        print('DEBUG:', *dargs, file=sys.stdout)
+
 class Addr2Line:
 
     # Matcher for a line that appears at the end a single decoded
@@ -74,16 +84,20 @@ class Addr2Line:
         res = res.split(': ', 1)[1]
         line = ''
         while Addr2Line.dummy_pattern.fullmatch(line) is None:
+            debug('From addr2line:', line)
             res += line
             line = self._output.stdout.readline()
+        debug('Found end marker')
         return res
 
     def __call__(self, address):
         if self._missing:
             return " ".join([self._binary, address, '\n'])
+        instr = address + '\n0x0\n'
+        debug('To addr2line: ' + instr)
         # We print a dummy 0x0 address after the address we are interested in
         # which we can look for in _read_address
-        self._input.stdin.write(address + '\n0x0\n')
+        self._input.stdin.write(instr)
         self._input.stdin.flush()
         return self._read_resolved_address()
 
