@@ -22,7 +22,7 @@ import argparse
 import re
 import sys
 
-from addr2line import BacktraceResolver
+from addr2line import BacktraceResolver, set_debug, debug
 
 class StdinBacktraceIterator(object):
     """
@@ -123,6 +123,13 @@ cmdline_parser.add_argument(
         ' it originates from, as well as the address being resolved')
 
 cmdline_parser.add_argument(
+        '-d',
+        '--debug',
+        action='store_true',
+        default=False,
+        help='Emit debugging information to stderr')
+
+cmdline_parser.add_argument(
         '-t',
         '--test',
         action='store_true',
@@ -137,6 +144,11 @@ cmdline_parser.add_argument(
         help='Addresses to parse')
 
 args = cmdline_parser.parse_args()
+
+if (args.debug):
+    set_debug(True)
+
+debug('debug output enabled')
 
 if args.test:
     data = [
