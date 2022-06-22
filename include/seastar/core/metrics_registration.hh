@@ -51,11 +51,14 @@ namespace seastar {
 namespace metrics {
 
 namespace impl {
+int default_handle();
 class metric_groups_def;
 struct metric_definition_impl;
 class metric_groups_impl;
 }
 
+
+int default_handle();
 
 using group_name_type = sstring; /*!< A group of logically related metrics */
 class metric_groups;
