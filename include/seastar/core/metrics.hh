@@ -341,7 +341,16 @@ public:
     const histogram& get_histogram() const {
         return std::get<histogram>(u);
     }
-
+    /*!
+     * \brief return true if this is metrics was never used
+     *
+     * Histograms, Summaries and counters are ever growing by nature, so
+     * it possible to check if they have been used or not.
+     */
+    bool is_empty() const {
+        return ((_type == data_type::HISTOGRAM || _type == data_type::SUMMARY) && get_histogram().sample_count == 0) ||
+                ((_type == data_type::COUNTER || _type == data_type::REAL_COUNTER) && d() == 0);
+    }
 private:
     static void ulong_conversion_error(double d);
 };
@@ -359,16 +368,21 @@ struct metric_definition_impl {
     metric_function f;
     description d;
     bool enabled = true;
+    bool _skip_when_empty = false;
+    std::vector<std::string> aggregate_labels;
     std::map<sstring, sstring> labels;
     metric_definition_impl& operator ()(bool enabled);
     metric_definition_impl& operator ()(const label_instance& label);
+    metric_definition_impl& aggregate(const std::vector<label>& labels);
+    metric_definition_impl& skip_when_empty(bool skip=true);
     metric_definition_impl& set_type(const sstring& type_name);
     metric_definition_impl(
         metric_name_type name,
         metric_type type,
         metric_function f,
         description d,
-        std::vector<label_instance> labels);
+        std::vector<label_instance> labels,
+        std::vector<label> aggregate_labels = {});
 };
 
 class metric_groups_def {
