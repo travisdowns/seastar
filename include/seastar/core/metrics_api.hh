@@ -182,6 +182,7 @@ public:
     metric_groups_impl& add_metric(group_name_type name, const metric_definition& md);
     metric_groups_impl& add_group(group_name_type name, const std::initializer_list<metric_definition>& l);
     metric_groups_impl& add_group(group_name_type name, const std::vector<metric_definition>& l);
+    int get_handle() const;
 };
 
 class impl;
@@ -210,8 +211,8 @@ public:
         _info.should_skip_when_empty = skip;
     }
 
-    bool get_skip_when_empty() const {
-        return _info.skip_when_empty;
+    skip_when_empty get_skip_when_empty() const {
+        return _info.should_skip_when_empty;
     }
 
     const metric_id& get_id() const {
