@@ -58,6 +58,8 @@ def standard_supported(standard, compiler='g++'):
 
 arg_parser = argparse.ArgumentParser('Configure seastar')
 arg_parser.add_argument('--mode', action='store', choices=seastar_cmake.SUPPORTED_MODES + ['all'], default='all')
+arg_parser.add_argument('--build-root', action='store', default='build', type=str, help='The name of the build root build directoy: '
+                        'using a different name allow multiple configurations to co-exist in the same repository')
 arg_parser.add_argument('--cflags', action = 'store', dest = 'user_cflags', default = '',
                         help = 'Extra flags for the C++ compiler')
 arg_parser.add_argument('--ldflags', action = 'store', dest = 'user_ldflags', default = '',
@@ -176,7 +178,7 @@ tr = seastar_cmake.translate_arg
 MODE_TO_CMAKE_BUILD_TYPE = {'release' : 'RelWithDebInfo', 'debug' : 'Debug', 'dev' : 'Dev', 'sanitize' : 'Sanitize' }
 
 def configure_mode(mode):
-    BUILD_PATH = seastar_cmake.BUILD_PATHS[mode]
+    BUILD_PATH = seastar_cmake.build_path(mode, build_root=args.build_root)
 
     CFLAGS = seastar_cmake.convert_strings_to_cmake_list(
         args.user_cflags,

@@ -37,7 +37,7 @@ if __name__ == "__main__":
     MODES = [args.mode] if args.mode else seastar_cmake.SUPPORTED_MODES
 
     def run_tests(mode):
-        BUILD_PATH = seastar_cmake.BUILD_PATHS[mode]
+        BUILD_PATH = seastar_cmake.build_path(mode)
 
         # For convenience.
         tr = seastar_cmake.translate_arg

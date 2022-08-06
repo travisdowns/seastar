@@ -21,9 +21,14 @@ SUPPORTED_MODES = ['release', 'debug', 'dev', 'sanitize']
 
 ROOT_PATH = os.path.realpath(os.path.dirname(__file__))
 
-BUILD_PATHS = { mode: os.path.join(ROOT_PATH, 'build', mode) for mode in SUPPORTED_MODES }
-
 COOKING_BASIC_ARGS = ['./cooking.sh']
+
+def build_path(mode, build_root = 'build'):
+    """Return the absolute path to the build directory for the given mode,
+    i.e., seastar_dir/<build_root>/<mode>"""
+    if mode not in SUPPORTED_MODES:
+        raise RuntimeError('Mode ' + mode + ' is not a supported mode')
+    return os.path.join(ROOT_PATH, build_root, mode)
 
 def is_release_mode(mode):
     return mode == 'release'
