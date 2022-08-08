@@ -66,6 +66,12 @@
 
 #include <dlfcn.h>
 
+#ifdef SEASTAR_DEBUG
+#define dassert(expr) assert(expr)
+#else
+#define dassert(expr) do {} while(false)
+#endif
+
 namespace seastar {
 
 extern seastar::logger seastar_logger;
@@ -400,9 +406,9 @@ class small_pool {
         uint8_t preferred;
         uint8_t fallback;
     };
+    free_object* _free = nullptr;
     unsigned _object_size;
     span_sizes _span_sizes;
-    free_object* _free = nullptr;
     size_t _free_count = 0;
     unsigned _min_free;
     unsigned _max_free;
@@ -412,7 +418,7 @@ class small_pool {
 public:
     explicit small_pool(unsigned object_size) noexcept;
     ~small_pool();
-    void* allocate();
+    inline void* allocate();
     void deallocate(void* object);
     unsigned object_size() const { return _object_size; }
     bool objects_page_aligned() const { return is_page_aligned(_object_size); }
@@ -420,7 +426,8 @@ public:
     static constexpr unsigned idx_to_size(unsigned idx);
     allocation_site_ptr& alloc_site_holder(void* ptr);
 private:
-    void add_more_objects();
+    inline void* pop_free();
+    void* add_more_objects();
     void trim_free_list();
     friend seastar::internal::log_buf::inserter_iterator do_dump_memory_diagnostics(seastar::internal::log_buf::inserter_iterator);
 };
@@ -503,6 +510,7 @@ struct cross_cpu_free_item {
 };
 
 struct cpu_pages {
+    small_pool_array small_pools;
     uint32_t min_free_pages = 20000000 / page_size;
     char* memory;
     page* pages;
@@ -515,7 +523,6 @@ struct cpu_pages {
     std::vector<reclaimer*> reclaimers;
     static constexpr unsigned nr_span_lists = 32;
     page_list free_spans[nr_span_lists];  // contains aligned spans with span_size == 2^idx
-    small_pool_array small_pools;
     alignas(seastar::cache_line_size) std::atomic<cross_cpu_free_item*> xcpu_freelist;
     static std::atomic<unsigned> cpu_id_gen;
     static cpu_pages* all_cpus[max_cpus];
@@ -547,7 +554,7 @@ struct cpu_pages {
     void free_span(pageidx start, uint32_t nr_pages);
     void free_span_no_merge(pageidx start, uint32_t nr_pages);
     void free_span_unaligned(pageidx start, uint32_t nr_pages);
-    void* allocate_small(unsigned size);
+    inline void* allocate_small(unsigned size);
     void free(void* ptr);
     void free(void* ptr, size_t size);
     static bool try_foreign_free(void* ptr);
@@ -851,7 +858,7 @@ void*
 cpu_pages::allocate_small(unsigned size) {
     auto idx = small_pool::size_to_idx(size);
     auto& pool = small_pools[idx];
-    assert(size <= pool.object_size());
+    dassert(size <= pool.object_size());
     auto ptr = pool.allocate();
 #ifdef SEASTAR_HEAPPROF
     if (!ptr) {
@@ -1232,21 +1239,27 @@ small_pool::~small_pool() {
     trim_free_list();
 }
 
+/**
+ * Remove the next object from the freelist and return it.
+ * It must exist (caller must check) or UB.
+ */
+void *
+small_pool::pop_free() {
+    auto* obj = _free;
+    _free = _free->next;
+    --_free_count;
+    return obj;
+}
+
 // Should not throw in case of running out of memory to avoid infinite recursion,
 // becaue throwing std::bad_alloc requires allocation. __cxa_allocate_exception
 // falls back to the emergency pool in case malloc() returns nullptr.
 void*
 small_pool::allocate() {
-    if (!_free) {
-        add_more_objects();
+    if (__builtin_expect((bool)_free, true)) {
+        return pop_free();
     }
-    if (!_free) {
-        return nullptr;
-    }
-    auto* obj = _free;
-    _free = _free->next;
-    --_free_count;
-    return obj;
+    return add_more_objects();
 }
 
 void
@@ -1260,7 +1273,7 @@ small_pool::deallocate(void* object) {
     }
 }
 
-void
+void*
 small_pool::add_more_objects() {
     auto goal = (_min_free + _max_free) / 2;
     while (!_span_list.empty() && _free_count < goal) {
@@ -1283,7 +1296,7 @@ small_pool::add_more_objects() {
             span_size = _span_sizes.fallback;
             data = reinterpret_cast<char*>(get_cpu_mem().allocate_large(span_size));
             if (!data) {
-                return;
+                break;
             }
         }
         auto span = get_cpu_mem().to_page(data);
@@ -1303,6 +1316,8 @@ small_pool::add_more_objects() {
             ++span->nr_small_alloc;
         }
     }
+
+    return _free ? pop_free() : nullptr;
 }
 
 void
@@ -1385,7 +1400,7 @@ static inline cpu_pages& get_cpu_mem()
 static constexpr int debug_allocation_pattern = 0xab;
 #endif
 
-void* allocate(size_t size) {
+void *allocate_slowpath(size_t size) {
     if (!is_reactor_thread) {
         if (original_malloc_func) {
             alloc_stats::increment(alloc_stats::types::foreign_mallocs);
@@ -1414,6 +1429,27 @@ void* allocate(size_t size) {
     }
     alloc_stats::increment_local(alloc_stats::types::allocs);
     return ptr;
+}
+
+[[gnu::always_inline]] void* allocate(size_t size) {
+
+    const bool fast_path = is_reactor_thread && size >= sizeof(free_object) && size <= max_small_allocation;
+
+    if (__builtin_expect(fast_path, true)) {
+        size = object_size_with_alloc_site(size);
+        auto ptr = get_cpu_mem().allocate_small(size);
+        if (!ptr) {
+            on_allocation_failure(size);
+        } else {
+    #ifdef SEASTAR_DEBUG_ALLOCATIONS
+            std::memset(ptr, debug_allocation_pattern, size);
+    #endif
+        }
+        alloc_stats::increment_local(alloc_stats::types::allocs);
+        return ptr;
+    }
+
+    return allocate_slowpath(size);
 }
 
 void* allocate_aligned(size_t align, size_t size) {
