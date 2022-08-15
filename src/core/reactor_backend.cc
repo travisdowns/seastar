@@ -21,6 +21,7 @@
 #include "core/reactor_backend.hh"
 #include "core/thread_pool.hh"
 #include "core/syscall_result.hh"
+#include "seastar/core/lowres_clock.hh"
 #include <seastar/core/print.hh>
 #include <seastar/core/reactor.hh>
 #include <seastar/core/internal/buffer_allocator.hh>
@@ -287,10 +288,12 @@ bool aio_storage_context::can_sleep() const {
     return executing == 0 || _r._aio_eventfd;
 }
 
-aio_general_context::aio_general_context(size_t nr)
+aio_general_context::aio_general_context(size_t nr, const char* name)
         : iocbs(new iocb*[nr])
         , last(iocbs.get())
+        , first(last)
         , end(iocbs.get() + nr)
+        , name{name}
 {
     setup_aio_context(nr, &io_context);
 }
@@ -300,24 +303,58 @@ aio_general_context::~aio_general_context() {
 }
 
 void aio_general_context::queue(linux_abi::iocb* iocb) {
+    auto qsize = last - first + 1;
+    if (__builtin_expect(qsize > queue_hwm, false)) {
+        auto gap_us = std::chrono::duration_cast<std::chrono::nanoseconds>(clock::now() - first_cb);
+        seastar_logger.warn("queue_hwm {} size {}, gap = {} ns, backtrace: {}", name,
+                last - iocbs.get(), gap_us.count(), current_backtrace_tasklocal());
+        queue_hwm = std::max(qsize, (long)queue_hwm * 2);
+        queue_hwm = std::min(queue_hwm, (size_t)(end - first));
+    }
     assert(last < end);
+    if (qsize == 1) {
+        // first cb added (since last flush)
+        first_cb = clock::now();
+    }
     *last++ = iocb;
 }
+
+
+inline constexpr unsigned alignment(void *p) {
+    return p ? 1 << (63 - __builtin_clzll((unsigned long long)p)) : 0;
+}
+
 
 size_t aio_general_context::flush() {
     auto begin = iocbs.get();
     auto retried = last;
+    auto initial_size = last - begin;
+    int iters = 0, fails = 0, ferrno = 0;
     while (begin != last) {
-        auto r = io_submit(io_context, last - begin, begin);
+        iters++;
+        auto sz = last - begin;
+        auto r = io_submit(io_context, sz, begin);
         if (__builtin_expect(r > 0, true)) {
             begin += r;
             continue;
         }
+
+        if (ferrno == 0) {
+            ferrno = errno;
+        }
+
+        fails++;
+
         // errno == EAGAIN is expected here. We don't explicitly assert that
         // since the assert below requires that some progress will be
         // made, preventing an endless loop for any reason.
         if (need_preempt()) {
-            assert(retried != begin);
+            if (retried == begin) {
+                // no progress was made
+                seastar_logger.error("aio_general_context::flush no progress init {} align {} r {} ferrno {} errno {} iters {} fails {} sz {} SZ {}",
+                        initial_size, alignment(iocbs.get()), r, ferrno, errno, iters, fails, sz, end - iocbs.get());
+                assert(false);
+            }
             retried = begin;
         }
     }
@@ -384,7 +421,7 @@ preempt_io_context::preempt_io_context(reactor& r, file_desc& task_quota, file_d
 void preempt_io_context::start_tick() {
     // Preempt whenever an event (timer tick or signal) is available on the
     // _preempting_io ring
-    set_need_preempt_var(reinterpret_cast<const preemption_monitor*>(_context.io_context + 8));
+    set_need_preempt_var(reinterpret_cast<const preemption_monitor*>(_context.get_io_ctx() + 8));
     // preempt_io_context::request_preemption() will write to reactor::_preemption_monitor, which is now ignored
 }
 
@@ -418,7 +455,7 @@ void preempt_io_context::reset_preemption_monitor() {
 
 bool preempt_io_context::service_preempting_io() {
     linux_abi::io_event a[2];
-    auto r = io_getevents(_context.io_context, 0, 2, a, 0);
+    auto r = io_getevents(_context.get_io_ctx(), 0, 2, a, 0);
     assert(r != -1);
     bool did_work = r > 0;
     for (unsigned i = 0; i != unsigned(r); ++i) {
@@ -454,7 +491,7 @@ bool reactor_backend_aio::await_events(int timeout, const sigset_t* active_sigma
     bool did_work = false;
     int r;
     do {
-        r = io_pgetevents(_polling_io.io_context, 1, batch_size, batch, tsp, active_sigmask);
+        r = io_pgetevents(_polling_io.get_io_ctx(), 1, batch_size, batch, tsp, active_sigmask);
         if (r == -1 && errno == EINTR) {
             return true;
         }

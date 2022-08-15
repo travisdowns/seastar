@@ -21,6 +21,7 @@
 
 #pragma once
 
+#include "seastar/core/lowres_clock.hh"
 #include <seastar/core/future.hh>
 #include <seastar/core/posix.hh>
 #include <seastar/core/internal/pollable_fd.hh>
@@ -45,16 +46,23 @@ class reactor;
 
 // FIXME: merge it with storage context below. At this point the
 // main thing to do is unify the iocb list
-struct aio_general_context {
-    explicit aio_general_context(size_t nr);
-    ~aio_general_context();
+class aio_general_context {
+    using clock = std::chrono::high_resolution_clock;
     internal::linux_abi::aio_context_t io_context{};
     std::unique_ptr<internal::linux_abi::iocb*[]> iocbs;
     internal::linux_abi::iocb** last;
+    internal::linux_abi::iocb** const first;
     internal::linux_abi::iocb** const end;
+    size_t queue_hwm = 0;
+    clock::time_point first_cb = {};
+    const char* name;
+public:
+    explicit aio_general_context(size_t nr, const char *name);
+    ~aio_general_context();
     void queue(internal::linux_abi::iocb* iocb);
     // submit all queued iocbs and return their count.
     size_t flush();
+    auto get_io_ctx() const { return io_context; };
 };
 
 class aio_storage_context {
@@ -147,7 +155,7 @@ struct smp_wakeup_aio_completion : public fd_kernel_completion,
 // Common aio-based Implementation of the task quota and hrtimer.
 class preempt_io_context {
     reactor& _r;
-    aio_general_context _context{2};
+    aio_general_context _context{2, "preempt_io_context"};
 
     task_quota_aio_completion _task_quota_aio_completion;
     hrtimer_aio_completion _hrtimer_aio_completion;
@@ -285,7 +293,7 @@ class reactor_backend_aio : public reactor_backend {
     // We use two aio contexts, one for preempting events (the timer tick and
     // signals), the other for non-preempting events (fd poll).
     preempt_io_context _preempting_io; // Used for the timer tick and the high resolution timer
-    aio_general_context _polling_io{max_polls()}; // FIXME: unify with disk aio_context
+    aio_general_context _polling_io{max_polls(), "polling_io"}; // FIXME: unify with disk aio_context
     hrtimer_aio_completion _hrtimer_poll_completion;
     smp_wakeup_aio_completion _smp_wakeup_aio_completion;
     static file_desc make_timerfd();

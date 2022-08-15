@@ -19,6 +19,7 @@
  * Copyright (C) 2017 ScyllaDB
  */
 
+#include "seastar/core/reactor.hh"
 #include <seastar/core/linux-aio.hh>
 #include <seastar/core/print.hh>
 #include <unistd.h>
@@ -74,9 +75,32 @@ int io_cancel(aio_context_t io_context, iocb* iocb, io_event* result) {
     return ::syscall(SYS_io_cancel, io_context, iocb, result);
 }
 
+enum ring_use {
+    NOT_USABLE = 1,
+    USABLE = 2
+};
+
+thread_local int ring_use_logger = 0;
+
 static int try_reap_events(aio_context_t io_context, long min_nr, long nr, io_event* events, const ::timespec* timeout,
         bool force_syscall) {
     auto ring = to_ring(io_context);
+
+    auto u = usable(ring);
+
+    if (u) {
+        if (!(ring_use_logger & USABLE)) {
+            seastar_logger.warn("Ring is usable");
+            ring_use_logger |= USABLE;
+        }
+    } else {
+        if (!(ring_use_logger & NOT_USABLE)) {
+            seastar_logger.warn("Ring is NOT usable");
+            ring_use_logger |= NOT_USABLE;
+        }
+    }
+
+
     if (usable(ring) && !force_syscall) {
         // Try to complete in userspace, if enough available events,
         // or if the timeout is zero
