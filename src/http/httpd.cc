@@ -181,8 +181,6 @@ future<> connection::read() {
         }
         f.ignore_ready_future();
         return _replies.push_eventually( {});
-    }).finally([this] {
-        return _read_buf.close();
     });
 }
 
@@ -322,6 +320,10 @@ future<> connection::process() {
             hlogger.debug("Response exception encountered: {}", std::current_exception());
         }
         return make_ready_future<>();
+    }).finally([this]{
+        return _read_buf.close().handle_exception([](std::exception_ptr e) {
+            hlogger.debug("Close exception encountered: {}", e);
+        });
     });
 }
 void connection::shutdown() {
