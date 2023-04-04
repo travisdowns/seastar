@@ -161,7 +161,7 @@ struct allocation_site {
     mutable size_t count = 0; // number of live objects allocated at backtrace.
     mutable size_t size = 0; // amount of bytes in live objects allocated at backtrace.
     mutable const allocation_site* next = nullptr;
-    saved_backtrace backtrace;
+    simple_backtrace backtrace;
 
     bool operator==(const allocation_site& o) const {
         return backtrace == o.backtrace;
@@ -179,7 +179,7 @@ namespace std {
 template<>
 struct hash<seastar::allocation_site> {
     size_t operator()(const seastar::allocation_site& bi) const {
-        return std::hash<seastar::saved_backtrace>()(bi.backtrace);
+        return std::hash<seastar::simple_backtrace>()(bi.backtrace);
     }
 };
 
@@ -527,7 +527,8 @@ struct cpu_pages {
         alloc_sites_type alloc_sites;
     } asu;
     allocation_site_ptr alloc_site_list_head = nullptr; // For easy traversal of asu.alloc_sites from scylla-gdb.py
-    bool collect_backtrace = false;
+    size_t collect_backtrace_every_n = 0;
+    size_t skipped_backtrace_count = 0;
     char* mem() { return memory; }
 
     void link(page_list& list, page* span);
@@ -582,18 +583,13 @@ static cpu_pages& get_cpu_mem();
 
 #ifdef SEASTAR_HEAPPROF
 
-void set_heap_profiling_enabled(bool enable) {
-    bool is_enabled = get_cpu_mem().collect_backtrace;
+void set_heap_profiling_enabled(bool enable, size_t every_n) {
     if (enable) {
-        if (!is_enabled) {
-            seastar_logger.info("Enabling heap profiler");
-        }
+        seastar_logger.info("Enabling heap profiler every {} allocations", every_n);
     } else {
-        if (is_enabled) {
-            seastar_logger.info("Disabling heap profiler");
-        }
+        seastar_logger.info("Disabling heap profiler");
     }
-    get_cpu_mem().collect_backtrace = enable;
+    get_cpu_mem().collect_backtrace_every_n = enable ? every_n : 0;
 }
 
 static thread_local int64_t scoped_heap_profiling_embed_count = 0;
@@ -803,25 +799,33 @@ cpu_pages::allocate_large_aligned(unsigned align_pages, unsigned n_pages) {
 }
 
 disable_backtrace_temporarily::disable_backtrace_temporarily() {
-    _old = get_cpu_mem().collect_backtrace;
-    get_cpu_mem().collect_backtrace = false;
+    _old = get_cpu_mem().collect_backtrace_every_n;
+    get_cpu_mem().collect_backtrace_every_n = 0;
 }
 
 disable_backtrace_temporarily::~disable_backtrace_temporarily() {
-    get_cpu_mem().collect_backtrace = _old;
+    get_cpu_mem().collect_backtrace_every_n = _old;
 }
 
 static
-saved_backtrace get_backtrace() noexcept {
+simple_backtrace get_backtrace() noexcept {
     disable_backtrace_temporarily dbt;
-    return current_backtrace();
+    // return current_backtrace();
+    return current_backtrace_tasklocal();
 }
 
 static
 allocation_site_ptr get_allocation_site() {
-    if (!cpu_mem.is_initialized() || !cpu_mem.collect_backtrace) {
+    if (!cpu_mem.is_initialized() || !cpu_mem.collect_backtrace_every_n) {
         return nullptr;
     }
+
+    if (++cpu_mem.skipped_backtrace_count != cpu_mem.collect_backtrace_every_n) {
+        return nullptr;
+    }
+
+    cpu_mem.skipped_backtrace_count = 0;
+
     disable_backtrace_temporarily dbt;
     allocation_site new_alloc_site;
     new_alloc_site.backtrace = get_backtrace();
@@ -1829,6 +1833,30 @@ sstring generate_memory_diagnostics_report() {
     auto it = buf.back_insert_begin();
     do_dump_memory_diagnostics(it);
     return sstring(buf.data(), buf.size());
+}
+
+sstring generate_heap_profile(size_t max_elems) {
+    disable_backtrace_temporarily dbt;
+
+    const auto& mem = get_cpu_mem();
+
+    auto& in = mem.asu.alloc_sites;
+    const size_t elem_count = std::min(max_elems, in.size());
+    std::vector<allocation_site> out(elem_count);
+
+
+
+    std::partial_sort_copy(in.begin(), in.end(), out.begin(), out.end(),
+        [](const allocation_site& left, const allocation_site& right) {
+            return left.size > right.size;
+        });
+
+    sstring all = "heap dump below\n";
+    for (auto& site : out) {
+        all += fmt::format("bytes: {}, count: {}, Backtrace: {}\n", site.size, site.count, site.backtrace);
+    }
+
+    return all;
 }
 
 static void trigger_error_injector() {

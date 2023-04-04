@@ -81,5 +81,7 @@ void set_additional_diagnostics_producer(noncopyable_function<void(memory_diagno
 /// low-memory conditions.
 sstring generate_memory_diagnostics_report();
 
+sstring generate_heap_profile(size_t max_elems);
+
 } // namespace memory
 } // namespace seastar

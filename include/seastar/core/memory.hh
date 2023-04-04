@@ -152,7 +152,7 @@ public:
 // Can be nested, in which case the profiling is re-enabled when all
 // the objects go out of scope.
 class disable_backtrace_temporarily {
-    bool _old;
+    size_t _old;
 public:
     disable_backtrace_temporarily();
     ~disable_backtrace_temporarily();
@@ -391,7 +391,7 @@ public:
 /// This script can generate either textual representation of the data,
 /// or a zoomable flame graph ([flame graph generation instructions](https://github.com/scylladb/scylla/wiki/Seastar-heap-profiler),
 /// [example flame graph](https://user-images.githubusercontent.com/1389273/72920437-f0cf8a80-3d51-11ea-92f0-f3dbeb698871.png)).
-void set_heap_profiling_enabled(bool);
+void set_heap_profiling_enabled(bool, size_t every_n = 1);
 
 /// Enable heap profiling for the duration of the scope.
 ///

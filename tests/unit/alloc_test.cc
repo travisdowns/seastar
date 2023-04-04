@@ -250,4 +250,35 @@ SEASTAR_TEST_CASE(test_bad_alloc_throws) {
 
     return make_ready_future<>();
 }
+
+volatile void * volatile sink;
+
+SEASTAR_TEST_CASE(test_heap_dump) {
+
+    constexpr bool do_delete = true;
+
+    // seastar::memory::set_heap_profiling_enabled(true, 777);
+
+    for (int i = 0; i < 1000000; i++) {
+        sink = new char[123];
+        if (do_delete) {
+            delete [] (char *)sink;
+        }
+    }
+
+    for (int i = 0; i < 100000; i++) {
+        sink = new char[12300];
+        if (do_delete) {
+            delete [] (char *)sink;
+        }
+    }
+
+    sstring dump = seastar::memory::generate_heap_profile(10);
+
+    std::printf(">>>>>>>>>>\n%s\n>>>>>>>>>>>>>\n", dump.c_str());
+
+    return make_ready_future<>();
+}
+
+
 #endif
