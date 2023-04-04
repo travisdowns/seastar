@@ -878,7 +878,7 @@ endif ()
 
 if (Seastar_HEAP_PROFILING)
     set_property (
-      SOURCE "src/core/memory.cc"
+      SOURCE "src/core/memory.cc" "src/core/reactor.cc"
       PROPERTY
       COMPILE_DEFINITIONS SEASTAR_HEAPPROF)
 endif ()
