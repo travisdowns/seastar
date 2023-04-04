@@ -52,6 +52,8 @@
 // Spans have a size that is a power-of-two and are naturally aligned (aka buddy
 // allocator)
 
+#define SEASTAR_HEAPPROF
+
 #include <seastar/core/cacheline.hh>
 #include <seastar/core/memory.hh>
 #include <seastar/core/print.hh>

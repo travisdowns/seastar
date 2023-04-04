@@ -257,7 +257,7 @@ SEASTAR_TEST_CASE(test_heap_dump) {
 
     constexpr bool do_delete = true;
 
-    // seastar::memory::set_heap_profiling_enabled(true, 777);
+    seastar::memory::set_heap_profiling_enabled(true, 776);
 
     for (int i = 0; i < 1000000; i++) {
         sink = new char[123];
