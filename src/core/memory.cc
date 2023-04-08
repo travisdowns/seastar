@@ -1846,14 +1846,24 @@ sstring generate_heap_profile(size_t max_elems) {
     const size_t elem_count = std::min(max_elems, in.size());
     std::vector<allocation_site> out(elem_count);
 
+    size_t sampled_count = 0, sampled_bytes = 0;
 
+    for (auto& site : in) {
+        sampled_count += site.count;
+        sampled_bytes += site.size;
+    }
 
     std::partial_sort_copy(in.begin(), in.end(), out.begin(), out.end(),
         [](const allocation_site& left, const allocation_site& right) {
             return left.size > right.size;
         });
 
-    sstring all = "heap dump below\n";
+    auto s = stats();
+
+    sstring all = fmt::format("Heap dump {}/{} sampled allocs (1 in {}), {}/{} sampled bytes (1 in {})\n",
+        sampled_count, s.mallocs() - s.frees(),  1. * (s.mallocs() - s.frees()) / sampled_count,
+        sampled_bytes, s.allocated_memory(), 1. * s.allocated_memory() / sampled_bytes);
+
     for (auto& site : out) {
         all += fmt::format("bytes: {}, count: {}, Backtrace: {}\n", site.size, site.count, site.backtrace);
     }
