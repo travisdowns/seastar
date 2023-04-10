@@ -69,12 +69,13 @@ public:
     using vector_type = boost::container::static_vector<frame, 64>;
 private:
     vector_type _frames;
-    size_t _hash;
     char _delimeter;
+    size_t _hash;
 private:
     size_t calculate_hash() const noexcept;
 public:
-    simple_backtrace(vector_type f, char delimeter = ' ') noexcept : _frames(std::move(f)), _delimeter(delimeter) {}
+    simple_backtrace(vector_type f, char delimeter = ' ') noexcept
+            : _frames(std::move(f)), _delimeter(delimeter), _hash(calculate_hash()) {}
     simple_backtrace(char delimeter = ' ') noexcept : simple_backtrace({}, delimeter) {}
 
     size_t hash() const noexcept { return _hash; }

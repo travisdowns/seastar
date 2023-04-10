@@ -34,6 +34,8 @@
 
 #include <malloc.h>
 
+#include "alloc_test_outline.hh"
+
 using namespace seastar;
 
 SEASTAR_TEST_CASE(alloc_almost_all_and_realloc_it_with_a_smaller_size) {
@@ -253,11 +255,11 @@ SEASTAR_TEST_CASE(test_bad_alloc_throws) {
 
 volatile void * volatile sink;
 
-SEASTAR_TEST_CASE(test_heap_dump) {
+SEASTAR_TEST_CASE(test_heap_dump_freq) {
 
-    constexpr bool do_delete = true;
+    constexpr bool do_delete = false;
 
-    seastar::memory::set_heap_profiling_enabled(true, 776);
+    seastar::memory::set_heap_profiling_enabled(true, 777);
 
     for (int i = 0; i < 1000000; i++) {
         sink = new char[123];
@@ -274,6 +276,36 @@ SEASTAR_TEST_CASE(test_heap_dump) {
     }
 
     sstring dump = seastar::memory::generate_heap_profile(10);
+
+    std::printf(">>>>>>>>>>\n%s\n>>>>>>>>>>>>>\n", dump.c_str());
+
+    return make_ready_future<>();
+}
+
+
+SEASTAR_TEST_CASE(test_heap_dump_many_paths) {
+
+    constexpr bool do_delete = false;
+
+    sink_method m = [] {
+        sink = new char[1234];
+        if (do_delete) {
+            delete [] (char *)sink;
+        }
+    };
+
+    seastar::memory::set_heap_profiling_enabled(true, 1);
+
+    // a full unroll means that a unique address appears for each iteration
+    // causing the stack traces to look different
+    #pragma nounroll
+    for (unsigned i = 0; i < 20000U; i++) {
+        recurse_ab(16, i & ~1U, m);        
+    }
+
+    seastar::memory::set_heap_profiling_enabled(false);
+
+    sstring dump = seastar::memory::generate_heap_profile(1);
 
     std::printf(">>>>>>>>>>\n%s\n>>>>>>>>>>>>>\n", dump.c_str());
 

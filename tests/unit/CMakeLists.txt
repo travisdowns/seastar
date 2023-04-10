@@ -225,7 +225,7 @@ seastar_add_test (abort_source
   SOURCES abort_source_test.cc)
 
 seastar_add_test (alloc
-  SOURCES alloc_test.cc)
+  SOURCES alloc_test_outline.cc alloc_test.cc)
 
 if (NOT Seastar_EXECUTE_ONLY_FAST_TESTS)
   set (allocator_test_args "")

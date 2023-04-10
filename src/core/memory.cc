@@ -172,6 +172,19 @@ struct allocation_site {
     bool operator!=(const allocation_site& o) const {
         return !(*this == o);
     }
+
+    void record_alloc(size_t size) const {
+        count++;
+        this->size += size;
+    }
+
+    bool record_free(size_t size) const {
+        assert(count > 0);
+        count--;
+        this->size -= size;
+        assert(count > 0 || this->size == 0);
+        return count == 0;
+    }
 };
 
 }
@@ -764,8 +777,7 @@ cpu_pages::allocate_large_and_trim(unsigned n_pages) {
     auto alloc_site = get_allocation_site();
     span->alloc_site = alloc_site;
     if (alloc_site) {
-        ++alloc_site->count;
-        alloc_site->size += span->span_size * page_size;
+        alloc_site->record_alloc(span->span_size * page_size);
     }
 #endif
     maybe_reclaim();
@@ -840,6 +852,18 @@ allocation_site_ptr get_allocation_site() {
     return alloc_site;
 }
 
+static void free_tracked_allocation(allocation_site_ptr& as, size_t size) {
+    if (as) {
+        if (as->record_free(size)) {
+            // this was the last allocation for a particular site, free it
+            // from the set
+            auto removed = cpu_mem.asu.alloc_sites.erase(*as);
+            assert(removed == 1);
+        }
+        as = nullptr;
+    }
+};
+
 #ifdef SEASTAR_HEAPPROF
 
 allocation_site_ptr&
@@ -865,8 +889,7 @@ cpu_pages::allocate_small(unsigned size) {
     }
     allocation_site_ptr alloc_site = get_allocation_site();
     if (alloc_site) {
-        ++alloc_site->count;
-        alloc_site->size += pool.object_size();
+        alloc_site->record_alloc(pool.object_size());
     }
     new (&pool.alloc_site_holder(ptr)) allocation_site_ptr{alloc_site};
 #endif
@@ -877,11 +900,7 @@ void cpu_pages::free_large(void* ptr) {
     pageidx idx = (reinterpret_cast<char*>(ptr) - mem()) / page_size;
     page* span = &pages[idx];
 #ifdef SEASTAR_HEAPPROF
-    auto alloc_site = span->alloc_site;
-    if (alloc_site) {
-        --alloc_site->count;
-        alloc_site->size -= span->span_size * page_size;
-    }
+    free_tracked_allocation(span->alloc_site, span->span_size * page_size);
 #endif
     free_span(idx, span->span_size);
 }
@@ -936,11 +955,7 @@ void cpu_pages::free(void* ptr) {
     if (span->pool) {
         small_pool& pool = *span->pool;
 #ifdef SEASTAR_HEAPPROF
-        allocation_site_ptr alloc_site = pool.alloc_site_holder(ptr);
-        if (alloc_site) {
-            --alloc_site->count;
-            alloc_site->size -= pool.object_size();
-        }
+        free_tracked_allocation(pool.alloc_site_holder(ptr), pool.object_size());
 #endif
         pool.deallocate(ptr);
     } else {
@@ -957,11 +972,7 @@ void cpu_pages::free(void* ptr, size_t size) {
         size = object_size_with_alloc_site(size);
         auto pool = &small_pools[small_pool::size_to_idx(size)];
 #ifdef SEASTAR_HEAPPROF
-        allocation_site_ptr alloc_site = pool->alloc_site_holder(ptr);
-        if (alloc_site) {
-            --alloc_site->count;
-            alloc_site->size -= pool->object_size();
-        }
+        free_tracked_allocation(pool->alloc_site_holder(ptr), pool->object_size());
 #endif
         pool->deallocate(ptr);
     } else {
@@ -1846,11 +1857,12 @@ sstring generate_heap_profile(size_t max_elems) {
     const size_t elem_count = std::min(max_elems, in.size());
     std::vector<allocation_site> out(elem_count);
 
-    size_t sampled_count = 0, sampled_bytes = 0;
+    size_t sampled_count = 0, sampled_bytes = 0, nonzero_sites = 0;
 
     for (auto& site : in) {
         sampled_count += site.count;
         sampled_bytes += site.size;
+        nonzero_sites += site.count ? 1 : 0;
     }
 
     std::partial_sort_copy(in.begin(), in.end(), out.begin(), out.end(),
@@ -1864,8 +1876,11 @@ sstring generate_heap_profile(size_t max_elems) {
         sampled_count, s.mallocs() - s.frees(),  1. * (s.mallocs() - s.frees()) / sampled_count,
         sampled_bytes, s.allocated_memory(), 1. * s.allocated_memory() / sampled_bytes);
 
+    all += fmt::format("Sites non-zero/total: {}/{}\n", nonzero_sites, in.size());
+
     for (auto& site : out) {
-        all += fmt::format("bytes: {}, count: {}, Backtrace: {}\n", site.size, site.count, site.backtrace);
+        all += fmt::format("    bytes: {}, count: {}, hash: {}, Backtrace: {}\n",
+                site.size, site.count, site.backtrace.hash(), site.backtrace);
     }
 
     return all;
