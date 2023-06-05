@@ -207,6 +207,7 @@ namespace memory {
 [[gnu::unused]]
 static allocation_site_ptr get_allocation_site();
 
+[[gnu::noinline]]
 static void on_allocation_failure(size_t size);
 
 static constexpr unsigned cpu_id_shift = 36; // FIXME: make dynamic
@@ -427,7 +428,7 @@ public:
     allocation_site_ptr& alloc_site_holder(void* ptr);
 private:
     inline void* pop_free();
-    void* add_more_objects();
+    [[gnu::noinline]] void* add_more_objects();
     void trim_free_list();
     friend seastar::internal::log_buf::inserter_iterator do_dump_memory_diagnostics(seastar::internal::log_buf::inserter_iterator);
 };
@@ -554,7 +555,7 @@ struct cpu_pages {
     void free_span(pageidx start, uint32_t nr_pages);
     void free_span_no_merge(pageidx start, uint32_t nr_pages);
     void free_span_unaligned(pageidx start, uint32_t nr_pages);
-    inline void* allocate_small(unsigned size);
+    [[gnu::always_inline]] inline void* allocate_small(unsigned size);
     void free(void* ptr);
     void free(void* ptr, size_t size);
     static bool try_foreign_free(void* ptr);
@@ -854,8 +855,7 @@ small_pool::alloc_site_holder(void* ptr) {
 
 #endif
 
-void*
-cpu_pages::allocate_small(unsigned size) {
+void* cpu_pages::allocate_small(unsigned size) {
     auto idx = small_pool::size_to_idx(size);
     auto& pool = small_pools[idx];
     dassert(size <= pool.object_size());
@@ -1256,10 +1256,7 @@ small_pool::pop_free() {
 // falls back to the emergency pool in case malloc() returns nullptr.
 void*
 small_pool::allocate() {
-    if (__builtin_expect((bool)_free, true)) {
-        return pop_free();
-    }
-    return add_more_objects();
+    return __builtin_expect((bool)_free, true) ? pop_free() : add_more_objects();
 }
 
 void
@@ -1308,7 +1305,7 @@ small_pool::add_more_objects() {
         }
         span->nr_small_alloc = 0;
         span->freelist = nullptr;
-        for (unsigned offset = 0; offset <= span_size * page_size - _object_size; offset += _object_size) {
+        for (size_t offset = 0; offset <= span_size * page_size - _object_size; offset += _object_size) {
             auto h = reinterpret_cast<free_object*>(data + offset);
             h->next = _free;
             _free = h;
@@ -1431,22 +1428,30 @@ void *allocate_slowpath(size_t size) {
     return ptr;
 }
 
-[[gnu::always_inline]] void* allocate(size_t size) {
+/**
+ * Common handling code when a pointer (possibly null) has
+ * been returned by any allocation path.
+ */
+[[gnu::always_inline]]
+static inline void* finish_allocation(void* ptr, size_t size) {
+    if (!ptr) {
+        on_allocation_failure(size);
+    } else {
+#ifdef SEASTAR_DEBUG_ALLOCATIONS
+    std::memset(ptr, debug_allocation_pattern, size);
+#endif
+    }
+    alloc_stats::increment_local(alloc_stats::types::allocs);
+    return ptr;
+}
 
-    const bool fast_path = is_reactor_thread && size >= sizeof(free_object) && size <= max_small_allocation;
+[[gnu::always_inline]]
+inline void* allocate(size_t size) {
 
-    if (__builtin_expect(fast_path, true)) {
+    if (__builtin_expect(is_reactor_thread && size <= max_small_allocation, true)) {
+        size = std::max(size, sizeof(free_object));
         size = object_size_with_alloc_site(size);
-        auto ptr = get_cpu_mem().allocate_small(size);
-        if (!ptr) {
-            on_allocation_failure(size);
-        } else {
-    #ifdef SEASTAR_DEBUG_ALLOCATIONS
-            std::memset(ptr, debug_allocation_pattern, size);
-    #endif
-        }
-        alloc_stats::increment_local(alloc_stats::types::allocs);
-        return ptr;
+        return finish_allocation(get_cpu_mem().allocate_small(size), size);
     }
 
     return allocate_slowpath(size);
