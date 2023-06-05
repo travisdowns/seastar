@@ -286,13 +286,17 @@ public:
     /// Total number of memory deallocations calls since the system was started.
     uint64_t frees() const { return _frees; }
     /// Total number of memory deallocations that occured on a different lcore
-    /// than the one on which they were allocated.
+    /// than the one on which they were allocated (for reactor threads only).
     uint64_t cross_cpu_frees() const { return _cross_cpu_frees; }
     /// Total number of objects which were allocated but not freed.
     size_t live_objects() const { return mallocs() - frees(); }
-    /// Total free memory (in bytes)
+    /// Total free memory (in bytes). This counts full pages available to the buddy allocator
+    /// only: free memory inside any of the small pools is not included. For this reason, free_memory
+    /// may not decrease even after allocation if it is satisfied by the small pool.
     size_t free_memory() const { return _free_memory; }
-    /// Total allocated memory (in bytes)
+    /// Total allocated memory (in bytes). This works on a page basis, so pages assigned to the small
+    /// pool are considered fully allocated. Specifically, this returns total_memory() - free_memory()
+    /// and so the description of free_memory() is relevant here.
     size_t allocated_memory() const { return _total_memory - _free_memory; }
     /// Total memory (in bytes)
     size_t total_memory() const { return _total_memory; }
@@ -305,9 +309,11 @@ public:
     uint64_t failed_allocations() const { return _failed_allocs; }
     /// Number of foreign allocations
     uint64_t foreign_mallocs() const { return _foreign_mallocs; }
-    /// Number of foreign frees
+    /// Number of foreign frees (frees of pointers not originating in the seastar memory
+    /// allocator) on non-reactor threads.
     uint64_t foreign_frees() const { return _foreign_frees; }
-    /// Number of foreign frees on reactor threads
+    /// Number of foreign frees (frees of pointers not originating in the seastar memory
+    /// allocator) on reactor threads.
     uint64_t foreign_cross_frees() const { return _foreign_cross_frees; }
     friend statistics stats();
 };
