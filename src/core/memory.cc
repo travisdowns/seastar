@@ -292,6 +292,7 @@ using allocate_system_memory_fn
 namespace bi = boost::intrusive;
 
 static thread_local uintptr_t local_expected_cpu_id = std::numeric_limits<uintptr_t>::max();
+static thread_local uintptr_t local_expected_cpu_id_unshifted = std::numeric_limits<uintptr_t>::max();
 
 inline
 unsigned object_cpu_id(const void* ptr) {
@@ -323,6 +324,10 @@ static char* mem_base() {
         known = align_up(cr, mem_base_alloc);
         ::munmap(cr, known - cr);
         ::munmap(known + mem_base_alloc, cr + 2 * mem_base_alloc - (known + mem_base_alloc));
+        // extremely unlikely for mmap to return a mapping at 0, but our detection of free(null)
+        // depends on it not doing that so check it
+        assert(known != nullptr);
+        assert(reinterpret_cast<uintptr_t>(known) != 0);
     });
     return known;
 }
@@ -410,7 +415,7 @@ class small_pool {
     free_object* _free = nullptr;
     unsigned _object_size;
     span_sizes _span_sizes;
-    size_t _free_count = 0;
+    unsigned _free_count = 0;
     unsigned _min_free;
     unsigned _max_free;
     unsigned _pages_in_use = 0;
@@ -558,13 +563,16 @@ struct cpu_pages {
     [[gnu::always_inline]] inline void* allocate_small(unsigned size);
     void free(void* ptr);
     void free(void* ptr, size_t size);
-    static bool try_foreign_free(void* ptr);
+    static bool is_fast_path_free(void* ptr);
+    static void do_foreign_free(void* ptr);
     void shrink(void* ptr, size_t new_size);
     static void free_cross_cpu(unsigned cpu_id, void* ptr);
     bool drain_cross_cpu_freelist();
     size_t object_size(void* ptr);
+
     page* to_page(void* p) {
-        return &pages[(reinterpret_cast<char*>(p) - mem()) / page_size];
+        size_t page_idx = ((uintptr_t)p) << (64 - cpu_id_shift) >> (64 - cpu_id_shift + page_bits);
+        return &pages[page_idx];
     }
 
     bool is_initialized() const;
@@ -970,12 +978,25 @@ void cpu_pages::free(void* ptr, size_t size) {
     }
 }
 
+// fast path for local free
+[[gnu::always_inline]]
 bool
-cpu_pages::try_foreign_free(void* ptr) {
-    // fast path for local free
-    if (__builtin_expect((reinterpret_cast<uintptr_t>(ptr) & cpu_id_and_mem_base_mask) == local_expected_cpu_id, true)) {
-        return false;
+cpu_pages::is_fast_path_free(void* ptr) {
+    return (reinterpret_cast<uintptr_t>(ptr) & cpu_id_and_mem_base_mask) == local_expected_cpu_id;
+}
+
+[[gnu::noinline]]
+void
+cpu_pages::do_foreign_free(void* ptr) {
+    // handles:
+    // 1) non-seastar pointers
+    // 2) cross-shard frees
+    // 3) null pointer
+    
+    if (!ptr) {
+        return;
     }
+
     if (!is_seastar_memory(ptr)) {
         if (is_reactor_thread) {
             alloc_stats::increment_local(alloc_stats::types::foreign_cross_frees);
@@ -983,10 +1004,8 @@ cpu_pages::try_foreign_free(void* ptr) {
             alloc_stats::increment(alloc_stats::types::foreign_frees);
         }
         original_free_func(ptr);
-        return true;
     }
     free_cross_cpu(object_cpu_id(ptr), ptr);
-    return true;
 }
 
 void cpu_pages::shrink(void* ptr, size_t new_size) {
@@ -1033,7 +1052,8 @@ bool cpu_pages::initialize() {
     }
     cpu_id = cpu_id_gen.fetch_add(1, std::memory_order_relaxed);
     local_expected_cpu_id = (static_cast<uint64_t>(cpu_id) << cpu_id_shift)
-	| reinterpret_cast<uintptr_t>(mem_base());
+	        | reinterpret_cast<uintptr_t>(mem_base());
+    local_expected_cpu_id_unshifted = local_expected_cpu_id >> cpu_id_shift;
     assert(cpu_id < max_cpus);
     all_cpus[cpu_id] = this;
     auto base = mem_base() + (size_t(cpu_id) << cpu_id_shift);
@@ -1490,20 +1510,24 @@ void* allocate_aligned(size_t align, size_t size) {
     return ptr;
 }
 
+[[gnu::always_inline]]
 void free(void* obj) {
-    if (cpu_pages::try_foreign_free(obj)) {
-        return;
+    if (cpu_pages::is_fast_path_free(obj)) {
+        alloc_stats::increment_local(alloc_stats::types::frees);
+        get_cpu_mem().free(obj);
+    } else {
+        cpu_pages::do_foreign_free(obj);
     }
-    alloc_stats::increment_local(alloc_stats::types::frees);
-    get_cpu_mem().free(obj);
 }
 
+[[gnu::always_inline]]
 void free(void* obj, size_t size) {
-    if (cpu_pages::try_foreign_free(obj)) {
-        return;
+    if (cpu_pages::is_fast_path_free(obj)) {
+        alloc_stats::increment_local(alloc_stats::types::frees);
+        get_cpu_mem().free(obj, size);
+    } else {
+        cpu_pages::do_foreign_free(obj);
     }
-    alloc_stats::increment_local(alloc_stats::types::frees);
-    get_cpu_mem().free(obj, size);
 }
 
 void free_aligned(void* obj, size_t align, size_t size) {
@@ -1925,9 +1949,7 @@ extern "C"
 [[gnu::visibility("default")]]
 [[gnu::used]]
 void free(void* ptr) {
-    if (ptr) {
-        seastar::memory::free(ptr);
-    }
+    seastar::memory::free(ptr);
 }
 
 extern "C"

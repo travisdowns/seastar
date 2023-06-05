@@ -22,6 +22,7 @@
 
 #include <boost/lexical_cast.hpp>
 
+using std::size_t;
 
 template <typename T>
 T from_env(const char* name, T default_val) {
@@ -30,7 +31,7 @@ T from_env(const char* name, T default_val) {
 }
 
 struct alloc_fixture {
-    static constexpr size_t COUNT = 100000;
+    static constexpr size_t COUNT = 1000;
 
     size_t _alloc_size = from_env<size_t>("ALLOC_SIZE", 8);
     std::array<void *, COUNT> _pointers{};
