@@ -44,6 +44,17 @@ void verify_param(const http::request& req, const sstring& param) {
     }
 }
 routes::routes() : _general_handler([this](std::exception_ptr eptr) mutable {
+    try {
+        std::rethrow_exception(eptr);
+    } catch (const redirect_exception& _e) {
+        auto rep = std::make_unique<http::reply>();
+        rep->add_header("Location", _e.url).set_status(_e.status()).done(
+                "json");
+        return rep;
+    } catch (...) {
+        // Fall through to return exception reply
+    }
+
     return exception_reply(eptr);
 }) {}
 
@@ -78,7 +89,12 @@ std::unique_ptr<http::reply> routes::exception_reply(std::exception_ptr eptr) {
         }
         std::rethrow_exception(eptr);
     } catch (const base_exception& e) {
-        rep->set_status(e.status(), json_exception(e).to_json());
+        if (e.content_type().size()) {
+            rep->set_status(e.status(), e.str());
+            rep->set_content_type(e.content_type());
+        } else {
+            rep->set_status(e.status(), json_exception(e).to_json());
+        }
     } catch (...) {
         rep->set_status(http::reply::status_type::internal_server_error,
                 json_exception(std::current_exception()).to_json());

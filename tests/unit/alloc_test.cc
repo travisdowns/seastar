@@ -19,6 +19,7 @@
  * Copyright (C) 2015 Cloudius Systems, Ltd.
  */
 
+#include <seastar/testing/perf_tests.hh>
 #include <seastar/testing/test_case.hh>
 #include <seastar/core/memory.hh>
 #include <seastar/core/smp.hh>
@@ -90,6 +91,23 @@ SEASTAR_TEST_CASE(test_aligned_alloc) {
     }
     return make_ready_future<>();
 }
+
+#ifdef __cpp_sized_deallocation
+SEASTAR_TEST_CASE(test_sized_delete) {
+    for (size_t size = 0; size <= 65536; size++) {
+        void *p0 = operator new(size), *p1 = operator new(size);
+        BOOST_REQUIRE(p0 != nullptr);
+        BOOST_REQUIRE(p1 != nullptr);
+        ::memset(p0, 1, size);
+        ::memset(p1, 2, size);
+        perf_tests::do_not_optimize(p0);
+        perf_tests::do_not_optimize(p1);
+        operator delete(p0, size);
+        operator delete(p1, size);
+    }
+    return make_ready_future<>();
+}
+#endif
 
 SEASTAR_TEST_CASE(test_temporary_buffer_aligned) {
     for (size_t align = sizeof(void*); align <= 65536; align <<= 1) {
@@ -311,6 +329,144 @@ SEASTAR_TEST_CASE(test_diagnostics_allocation) {
     return seastar::make_ready_future();
 }
 
+#ifdef SEASTAR_HEAPPROF
+
+SEASTAR_TEST_CASE(test_sampled_profile_collection_small)
+{
+    {
+        auto stats = seastar::memory::sampled_memory_profile();
+        BOOST_REQUIRE_EQUAL(stats.size(), 0);
+    }
+
+    std::size_t count = 100;
+    std::vector<volatile char*> ptrs(count);
+
+    seastar::memory::set_heap_profiling_sampling_rate(100);
+
+    #pragma nounroll
+    for (std::size_t i = 0; i < count / 2; ++i)
+    {
+        volatile char* ptr = static_cast<char*>(malloc(10));
+        *ptr = 'c'; // to prevent compiler from considering this a dead allocation and optimizing it out
+        ptrs[i] = ptr;
+    }
+
+    #pragma nounroll
+    for (std::size_t i = count / 2; i < count; ++i)
+    {
+        volatile char* ptr = static_cast<char*>(malloc(10));
+        *ptr = 'c'; // to prevent compiler from considering this a dead allocation and optimizing it out
+        ptrs[i] = ptr;
+    }
+
+    // NB: the test framework allocates
+    seastar::memory::set_heap_profiling_sampling_rate(0);
+
+    {
+        auto stats = seastar::memory::sampled_memory_profile();
+        BOOST_REQUIRE_EQUAL(stats.size(), 2);
+        BOOST_REQUIRE_EQUAL(stats[0].size, stats[0].count * 100);
+    }
+
+    seastar::memory::set_heap_profiling_sampling_rate(100);
+
+    for (auto ptr : ptrs)
+    {
+        free((void*)ptr);
+    }
+
+    seastar::memory::set_heap_profiling_sampling_rate(0);
+
+    {
+        auto stats = seastar::memory::sampled_memory_profile();
+        BOOST_REQUIRE_EQUAL(stats.size(), 0);
+    }
+
+    return seastar::make_ready_future();
+}
+
+SEASTAR_TEST_CASE(test_sampled_profile_collection_large)
+{
+    {
+        auto stats = seastar::memory::sampled_memory_profile();
+        BOOST_REQUIRE_EQUAL(stats.size(), 0);
+    }
+
+    std::size_t count = 100;
+    std::vector<volatile char*> ptrs(count);
+
+    seastar::memory::set_heap_profiling_sampling_rate(1000000);
+
+    #pragma nounroll
+    for (std::size_t i = 0; i < count / 2; ++i)
+    {
+        volatile char* ptr = static_cast<char*>(malloc(100000));
+        *ptr = 'c'; // to prevent compiler from considering this a dead allocation and optimizing it out
+        ptrs[i] = ptr;
+    }
+
+    #pragma nounroll
+    for (std::size_t i = count / 2; i < count; ++i)
+    {
+        volatile char* ptr = static_cast<char*>(malloc(100000));
+        *ptr = 'c'; // to prevent compiler from considering this a dead allocation and optimizing it out
+        ptrs[i] = ptr;
+    }
+
+    // NB: the test framework allocate
+    seastar::memory::set_heap_profiling_sampling_rate(0);
+
+    {
+        auto stats = seastar::memory::sampled_memory_profile();
+        BOOST_REQUIRE_EQUAL(stats.size(), 2);
+        BOOST_REQUIRE_EQUAL(stats[0].size, stats[0].count * 1000000);
+    }
+
+    seastar::memory::set_heap_profiling_sampling_rate(1000000);
+
+    for (auto ptr : ptrs)
+    {
+        free((void*)ptr);
+    }
+
+    seastar::memory::set_heap_profiling_sampling_rate(0);
+
+    {
+        auto stats = seastar::memory::sampled_memory_profile();
+        // NOTE this is because right now the tracking structure doesn't delete call sites ever
+        BOOST_REQUIRE_EQUAL(stats.size(), 0);
+    }
+
+    return seastar::make_ready_future();
+}
+
+SEASTAR_TEST_CASE(test_sampled_profile_collection_max_sites)
+{
+    std::size_t count = 1010;
+    std::vector<volatile char*> ptrs(count);
+
+    seastar::memory::set_heap_profiling_sampling_rate(100);
+
+    #pragma unroll 1010
+    for (std::size_t i = 0; i < count; ++i)
+    {
+        volatile char* ptr = static_cast<char*>(malloc(1000));
+        *ptr = 'c'; // to prevent compiler from considering this a dead allocation and optimizing it out
+        ptrs[i] = ptr;
+    }
+
+    seastar::memory::set_heap_profiling_sampling_rate(0);
+
+    {
+        auto stats = seastar::memory::sampled_memory_profile();
+        BOOST_REQUIRE_EQUAL(stats.size(), 1000);
+    }
+
+    return seastar::make_ready_future();
+}
+
+
+#endif // SEASTAR_HEAPPROF
 
 #endif // #ifndef SEASTAR_DEFAULT_ALLOCATOR
 

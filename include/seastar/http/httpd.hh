@@ -84,13 +84,15 @@ class connection : public boost::intrusive::list_base_hook<> {
     // null element marks eof
     queue<std::unique_ptr<http::reply>> _replies { 10 };
     bool _done = false;
+    bool _tls;
+    int _listener_idx;
 public:
-    [[deprecated("use connection(http_server&, connected_socket&&)")]]
-    connection(http_server& server, connected_socket&& fd,
-            socket_address) : connection(server, std::move(fd)) {}
-    connection(http_server& server, connected_socket&& fd)
+    [[deprecated("use connection(http_server&, connected_socket&&, bool tls, int listener_idx)")]]
+    connection(http_server& server, connected_socket&& fd, socket_address, bool tls, int listener_idx)
+            : connection(server, std::move(fd), tls, listener_idx) {}
+    connection(http_server& server, connected_socket&& fd, bool tls, int listener_idx)
             : _server(server), _fd(std::move(fd)), _read_buf(_fd.input()), _write_buf(
-                    _fd.output()) {
+                    _fd.output()), _tls(tls), _listener_idx(listener_idx) {
         on_new_connection();
     }
     ~connection();
@@ -108,7 +110,7 @@ public:
     future<> start_response();
 
     future<bool> generate_reply(std::unique_ptr<http::request> req);
-    void generate_error_reply_and_close(std::unique_ptr<http::request> req, http::reply::status_type status, const sstring& msg);
+    void generate_error_reply_and_close(std::unique_ptr<http::request> req, reply::status_type status, const sstring& msg, const sstring &content_type={});
 
     future<> write_body();
 
@@ -173,11 +175,13 @@ public:
 
     void set_content_streaming(bool b);
 
+    future<> listen(socket_address addr, shared_ptr<seastar::tls::server_credentials> credentials);
+    future<> listen(socket_address addr, listen_options lo, shared_ptr<seastar::tls::server_credentials> credentials);
     future<> listen(socket_address addr, listen_options lo);
     future<> listen(socket_address addr);
     future<> stop();
 
-    future<> do_accepts(int which);
+    future<> do_accepts(int which, bool tls = false);
 
     uint64_t total_connections() const;
     uint64_t current_connections() const;
@@ -188,7 +192,7 @@ public:
     // RFC 7231, Section 7.1.1.1.
     static sstring http_date();
 private:
-    future<> do_accept_one(int which);
+    future<> do_accept_one(int which, bool tls);
     boost::intrusive::list<connection> _connections;
     friend class seastar::httpd::connection;
     friend class http_server_tester;
@@ -226,7 +230,9 @@ public:
     future<> stop();
     future<> set_routes(std::function<void(routes& r)> fun);
     future<> listen(socket_address addr);
+    future<> listen(socket_address addr, shared_ptr<seastar::tls::server_credentials> credentials);
     future<> listen(socket_address addr, listen_options lo);
+    future<> listen(socket_address addr, listen_options lo, shared_ptr<seastar::tls::server_credentials> credentials);
     distributed<http_server>& server();
 };
 SEASTAR_MODULE_EXPORT_END

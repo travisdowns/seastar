@@ -88,6 +88,14 @@ struct reactor_options : public program_options::option_group {
     ///
     /// Default: \p true.
     program_options::value<bool> blocked_reactor_report_format_oneline;
+    /// \brief The sample rate for the reactor profiler.
+    ///
+    /// Default 100.
+    program_options::value<unsigned> profiler_sample_period_ms;
+    /// \brief Optionally enable the profiler.
+    ///
+    /// Default false.
+    program_options::value<bool> profiler_enabled;
     /// \brief Allow using buffered I/O if DMA is not available (reduces performance).
     program_options::value<> relaxed_dma;
     /// \brief Use the Linux NOWAIT AIO feature, which reduces reactor stalls due
@@ -151,8 +159,12 @@ struct reactor_options : public program_options::option_group {
     program_options::value<unsigned> max_networking_io_control_blocks;
     /// \brief Enable seastar heap profiling.
     ///
+    /// Allocations will be sampled every N bytes on average. Zero means off.
+    ///
+    /// Default: 0
+    ///
     /// \note Unused when seastar was compiled without heap profiling support.
-    program_options::value<> heapprof;
+    program_options::value<unsigned> heapprof;
     /// Ignore SIGINT (for gdb).
     program_options::value<> no_handle_interrupt;
 

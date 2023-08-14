@@ -132,6 +132,12 @@ function (seastar_add_test name)
           SEASTAR_THREAD_STACK_GUARDS)
     endif ()
 
+    if (Seastar_HEAP_PROFILING)
+      target_compile_definitions (${executable_target}
+        PRIVATE
+          SEASTAR_HEAPPROF)
+    endif ()
+
     target_include_directories (${executable_target}
       PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
@@ -357,6 +363,9 @@ seastar_add_test (lowres_clock
 seastar_add_test (metrics
   SOURCES metrics_test.cc)
 
+seastar_add_test (metrics_family_replication
+  SOURCES metric_family_replication_test.cc)
+
 seastar_add_test (net_config
   KIND BOOST
   SOURCES net_config_test.cc)
@@ -418,6 +427,9 @@ seastar_add_test (sstring
 
 seastar_add_test (stall_detector
   SOURCES stall_detector_test.cc)
+
+seastar_add_test (cpu_profiler
+  SOURCES cpu_profiler_test.cc)
 
 seastar_add_test (stream_reader
   SOURCES stream_reader_test.cc)
