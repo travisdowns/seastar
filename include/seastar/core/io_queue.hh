@@ -23,6 +23,7 @@
 
 #include <boost/container/static_vector.hpp>
 #include <chrono>
+#include <limits>
 #include <memory>
 #include <vector>
 #include <sys/uio.h>
@@ -192,6 +193,12 @@ public:
         std::chrono::milliseconds stall_threshold = std::chrono::milliseconds(100);
         std::chrono::microseconds tau = std::chrono::milliseconds(5);
         std::optional<uint32_t> physical_block_size; // Override for disks that lie about their physical block size
+
+        // Original values of io-properties (if available)
+        size_t read_bytes_rate = std::numeric_limits<size_t>::max();
+        size_t write_bytes_rate = std::numeric_limits<size_t>::max();
+        size_t read_req_rate = std::numeric_limits<size_t>::max();
+        size_t write_req_rate = std::numeric_limits<size_t>::max();
     };
 
     io_queue(io_group_ptr group, internal::io_sink& sink);
