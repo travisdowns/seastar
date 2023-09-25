@@ -203,6 +203,11 @@ struct io_queue::config disk_config_params::generate_config(const disk_params& p
     cfg.stall_threshold = stall_threshold();
     cfg.physical_block_size = p.physical_block_size;
 
+    cfg.read_bytes_rate = p.read_bytes_rate;
+    cfg.write_bytes_rate = p.write_bytes_rate;
+    cfg.read_req_rate = p.read_req_rate;
+    cfg.write_req_rate = p.write_req_rate;
+
     return cfg;
 }
 
