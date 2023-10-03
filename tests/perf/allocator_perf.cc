@@ -24,16 +24,38 @@
 #include <seastar/core/memory.hh>
 #include <sys/mman.h>
 
-struct allocator_test {
-    static constexpr size_t COUNT = 1000;
-    std::array<void *, COUNT> _pointers{};
-};
+struct alloc_bench {
 
-struct allocator_test_split : public allocator_test {
-    enum alloc_test_flags {
-      MEASURE_ALLOC = 1 << 0,
-      MEASURE_FREE = 2 << 0,
+    static constexpr size_t small_alloc_size = 8;
+    static constexpr size_t large_alloc_size = 32000;
+    static constexpr size_t MAX_POINTERS = 1000;
+    
+    enum alloc_test_flags : uint8_t {
+        MEASURE_ALLOC = 1,
+        MEASURE_FREE  = 2
     };
+
+    using alloc_fn = void * (size_t);
+    using free_fn = void (void *);
+
+    struct c_funcs {
+        static constexpr alloc_fn * const alloc = std::malloc;
+        static constexpr free_fn * const free = std::free;
+    };
+
+    struct cpp_operator_funcs {
+        static void * alloc(size_t size) { return operator new(size); }
+        static void free(void *p){ operator delete(p); }
+    };
+
+    struct cpp_array_funcs {
+        static void * alloc(size_t size) { return new char[size]; }
+        static void free(void *p){ delete [] static_cast<char *>(p); }
+    };
+
+    // struct operator 
+
+    static constexpr alloc_test_flags MEASURE_BOTH = (alloc_test_flags)(MEASURE_ALLOC | MEASURE_FREE);
 
     template <int M> struct maybe_measure {
         maybe_measure() {
@@ -46,38 +68,50 @@ struct allocator_test_split : public allocator_test {
         }
     };
 
-    template <size_t alloc_size, alloc_test_flags F = alloc_test_flags(MEASURE_ALLOC |
-                                                    MEASURE_FREE)>
+    template <size_t alloc_size, alloc_test_flags F, typename A>
     size_t alloc_test() {
         {
           maybe_measure<F & MEASURE_ALLOC> m;
           for (auto &p : _pointers) {
-            p = std::malloc(alloc_size);
+            p = A::alloc(alloc_size);
           }
         }
 
         {
           maybe_measure<F & MEASURE_FREE> m;
           for (auto &p : _pointers) {
-            std::free(p);
+            A::free(p);
           }
         }
 
         return _pointers.size();
     }
+
+    std::array<void *, MAX_POINTERS> _pointers{};
 };
 
-PERF_TEST_F(allocator_test_split, alloc_only) { return alloc_test<8, MEASURE_ALLOC>(); }
+PERF_TEST_F(alloc_bench, malloc_only)      { return alloc_test<small_alloc_size, MEASURE_ALLOC, c_funcs>(); }
+PERF_TEST_F(alloc_bench, free_only)        { return alloc_test<small_alloc_size, MEASURE_FREE, c_funcs>(); }
+PERF_TEST_F(alloc_bench, malloc_free)      { return alloc_test<small_alloc_size, MEASURE_BOTH, c_funcs>(); }
 
-PERF_TEST_F(allocator_test_split, free_only) { return alloc_test<8, MEASURE_FREE>(); }
+PERF_TEST_F(alloc_bench, op_new_only)      { return alloc_test<small_alloc_size, MEASURE_ALLOC, cpp_operator_funcs>(); }
+PERF_TEST_F(alloc_bench, op_delete_only)   { return alloc_test<small_alloc_size, MEASURE_FREE, cpp_operator_funcs>(); }
+PERF_TEST_F(alloc_bench, op_new_delete)    { return alloc_test<small_alloc_size, MEASURE_BOTH, cpp_operator_funcs>(); }
 
-PERF_TEST_F(allocator_test_split, alloc_free) { return alloc_test<8>(); }
+// PERF_TEST_F(alloc_bench, new_array_only)   { return alloc_test<small_alloc_size, MEASURE_ALLOC, cpp_array_funcs>(); }
+// PERF_TEST_F(alloc_bench, delete_array_only){ return alloc_test<small_alloc_size, MEASURE_FREE, cpp_array_funcs>(); }
+// PERF_TEST_F(alloc_bench, new_delete_array) { return alloc_test<small_alloc_size, MEASURE_BOTH, cpp_array_funcs>(); }
+
+PERF_TEST_F(alloc_bench, alloc_only_large) { return alloc_test<large_alloc_size, MEASURE_ALLOC, c_funcs>(); }
+PERF_TEST_F(alloc_bench, free_only_large ) { return alloc_test<large_alloc_size, MEASURE_FREE, c_funcs>(); }
+PERF_TEST_F(alloc_bench, alloc_free_large) { return alloc_test<large_alloc_size, MEASURE_BOTH, c_funcs>(); }
 
 // this test doesn't serve much value. It should take about 10 times as the
 // single alloc test above. If not, something is wrong.
-PERF_TEST_F(allocator_test, single_alloc_and_free_small_many)
+PERF_TEST_F(alloc_bench, single_alloc_and_free_small_many)
 {
     const std::size_t allocs = 10;
+    static_assert(allocs <= MAX_POINTERS);
 
     for (std::size_t i = 0; i < allocs; ++i)
     {
@@ -94,10 +128,12 @@ PERF_TEST_F(allocator_test, single_alloc_and_free_small_many)
 
 // Allocate from more than one page. Should also not suffer a perf penalty 
 // As we should have at least min free of 50 objects (hard coded internally)
-PERF_TEST_F(allocator_test, single_alloc_and_free_small_many_cross_page)
+PERF_TEST_F(alloc_bench, single_alloc_and_free_small_many_cross_page)
 {
     const std::size_t alloc_size = 1024;
     const std::size_t allocs = (seastar::memory::page_size / alloc_size) + 1;
+
+    static_assert(allocs <= MAX_POINTERS);
 
     for (std::size_t i = 0; i < allocs; ++i)
     {
@@ -114,7 +150,7 @@ PERF_TEST_F(allocator_test, single_alloc_and_free_small_many_cross_page)
 
 // Include an allocation in the benchmark that will require going to the large pool
 // for more data for the small pool
-PERF_TEST_F(allocator_test, single_alloc_and_free_small_many_cross_page_alloc_more)
+PERF_TEST_F(alloc_bench, single_alloc_and_free_small_many_cross_page_alloc_more)
 {
     const std::size_t alloc_size = 1024;
     const std::size_t allocs = 101; // at 1024 alloc size we will have a _max_free of 100 objects
@@ -131,9 +167,3 @@ PERF_TEST_F(allocator_test, single_alloc_and_free_small_many_cross_page_alloc_mo
         free(_pointers[i]);
     }
 }
-
-PERF_TEST_F(allocator_test_split, alloc_only_large) { return alloc_test<32000, MEASURE_ALLOC>(); }
-
-PERF_TEST_F(allocator_test_split, free_only_large) { return alloc_test<32000, MEASURE_FREE>(); }
-
-PERF_TEST_F(allocator_test_split, alloc_free_large) { return alloc_test<32000>(); }
