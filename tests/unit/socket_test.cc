@@ -19,6 +19,10 @@
  * Copyright (C) 2019 Elazar Leibovich
  */
 
+#include "seastar/core/iostream.hh"
+#include "seastar/net/api.hh"
+#include <cstdlib>
+#include <exception>
 #include <seastar/core/reactor.hh>
 #include <seastar/core/seastar.hh>
 #include <seastar/core/app-template.hh>
@@ -27,6 +31,8 @@
 #include <seastar/util/std-compat.hh>
 #include <seastar/util/later.hh>
 #include <seastar/testing/test_case.hh>
+#include <seastar/testing/thread_test_case.hh>
+
 #include <seastar/core/abort_source.hh>
 #include <seastar/core/sleep.hh>
 #include <seastar/core/thread.hh>
@@ -223,4 +229,77 @@ SEASTAR_TEST_CASE(socket_on_close_local_shutdown_test) {
 
         when_all(std::move(client), std::move(server)).discard_result().get();
     });
+}
+
+int getint(const char* name, int default_value) {
+    auto val = std::getenv(name);
+    return val ? std::atoi(val) : default_value;
+}
+
+SEASTAR_THREAD_TEST_CASE(open_n) {
+
+    // sleep in read/write loop, allowing reaping 
+    // if true we get the retry_until assert, if false we 
+    // get the last < end assert
+    bool DO_SLEEP = getint("DO_SLEEP", 1); 
+
+    // how many sockets to create
+    int socket_count = getint("SOCKET_COUNT", 100);
+
+    using namespace std::chrono_literals;
+
+    std::vector<connected_socket> sockets;
+
+    auto addr = make_ipv4_address({"127.0.0.1", 9999});
+
+    for (int i = 0; i < socket_count; i++) {
+        sockets.push_back(connect(addr).then([=](connected_socket&& socket) {
+            fmt::print("Connected socket {}\n", i);
+            return std::move(socket);
+        }).get());
+
+        auto& s = sockets.back();
+        int send_buf = 4096;
+        s.set_sockopt(SOL_SOCKET, SO_SNDBUF, &send_buf, sizeof(send_buf));
+    }
+
+    fmt::print("Connected all {} sockets\n", socket_count);
+
+    // big enough to exceed the socket buffer even for local sockets
+    constexpr size_t bufsz = 100 * 8192; 
+    auto buf = std::unique_ptr<char[]>(new char[bufsz]{});
+
+    bool* loop_done = new bool{false};
+
+    for (int i = 0; i < socket_count; i++) {
+        auto& s = sockets[i];
+
+        (void)s.input().read_exactly(100).then([](auto buf) {
+            fmt::print("Unexpectedly read a buffer of {} bytes\n", buf.size());
+        }).handle_exception([](auto e) {});
+
+        if (DO_SLEEP) {
+            sleep(1ns).get();
+        }
+
+        output_stream<char>* os = new output_stream<char>(s.output());
+
+        (void)os->write(buf.get(), bufsz).then([=](){ assert(*loop_done); });
+
+        if (DO_SLEEP) {
+            sleep(1ns).get();
+        }
+
+        (void)s.wait_input_shutdown().then([=] { assert(*loop_done); });
+
+        fmt::print("set up read/write on socket {}\n", i);
+        std::fflush(stdout);
+    }
+
+    fmt::print("All sockets set up\n");
+    
+    *loop_done = true;
+
+    sleep(2s).get();
+
 }
