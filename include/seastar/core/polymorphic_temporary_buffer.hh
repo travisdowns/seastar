@@ -37,7 +37,7 @@ temporary_buffer<CharType> make_temporary_buffer(std::pmr::polymorphic_allocator
         return temporary_buffer<CharType>(size);
     }
     CharType *buffer = allocator->allocate(size);
-    return temporary_buffer<CharType>(buffer, size,
+    return temporary_buffer<CharType>::maybe_unsafe_from_deleter(buffer, size,
         make_deleter(deleter(), [allocator, buffer, size] () mutable { allocator->deallocate(buffer, size); }));
 }
 
