@@ -82,14 +82,14 @@ snd_buf make_shard_local_buffer_copy(snd_buf* org, std::function<deleter(snd_buf
     auto* one = std::get_if<temporary_buffer<char>>(&org->bufs);
 
     if (one) {
-        buf.bufs = temporary_buffer<char>(one->get_write(), one->size(), make_deleter(org));
+        buf.bufs = temporary_buffer<char>::maybe_unsafe_from_deleter(one->get_write(), one->size(), make_deleter(org));
     } else {
         auto& orgbufs = std::get<std::vector<temporary_buffer<char>>>(org->bufs);
         std::vector<temporary_buffer<char>> newbufs;
         newbufs.reserve(orgbufs.size());
         auto d = make_deleter(org);
         for (auto&& b : orgbufs) {
-            newbufs.emplace_back(b.get_write(), b.size(), d.share());
+            newbufs.emplace_back(temporary_buffer<char>::maybe_unsafe_from_deleter(b.get_write(), b.size(), d.share()));
         }
         buf.bufs = std::move(newbufs);
     }
@@ -107,14 +107,14 @@ rcv_buf make_shard_local_buffer_copy(foreign_ptr<std::unique_ptr<rcv_buf>> org) 
     auto* one = std::get_if<temporary_buffer<char>>(&org->bufs);
 
     if (one) {
-        buf.bufs = temporary_buffer<char>(one->get_write(), one->size(), make_object_deleter(std::move(org)));
+        buf.bufs = temporary_buffer<char>::maybe_unsafe_from_deleter(one->get_write(), one->size(), make_object_deleter(std::move(org)));
     } else {
         auto& orgbufs = std::get<std::vector<temporary_buffer<char>>>(org->bufs);
         std::vector<temporary_buffer<char>> newbufs;
         newbufs.reserve(orgbufs.size());
         deleter d = make_object_deleter(std::move(org));
         for (auto&& b : orgbufs) {
-            newbufs.emplace_back(b.get_write(), b.size(), d.share());
+            newbufs.push_back(temporary_buffer<char>::maybe_unsafe_from_deleter(b.get_write(), b.size(), d.share()));
         }
         buf.bufs = std::move(newbufs);
     }

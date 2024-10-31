@@ -36,6 +36,15 @@
 
 namespace seastar {
 
+/*
+ * The custom-deleter constructor of temporary_buffer has been made private to
+ * better ensure the safety of cross-shard sharing the temporary_buffer.
+ *
+ * The forward declarations here are to allow for some manually verified, pre-existing,
+ * code to still access the newly-private constructor.
+ */
+
+
 /// \addtogroup memory-module
 /// @{
 
@@ -95,6 +104,17 @@ public:
         x._size = 0;
     }
 
+    /// @brief Create a temporary buffer from a buffer pointer and deleter.
+    ///
+    /// In the Redpanda fork, this operation is potentially unsafe as deleters
+    /// may be invoked on _any_ thread, so a deleter must be safe to call in
+    /// this way. In seastar upstream, temporary_buffer is not safe to share
+    /// across threads, so deleters are called in a more restricted way.
+    static temporary_buffer maybe_unsafe_from_deleter(CharType* buf, size_t size, deleter&& d) noexcept {
+        return temporary_buffer(buf, size, std::move(d));
+    }
+
+private:
     /// Creates a \c temporary_buffer with a specific deleter.
     ///
     /// \param buf beginning of the buffer held by this \c temporary_buffer
@@ -103,6 +123,8 @@ public:
     ///          will be destroyed when there are no longer any users for the buffer.
     temporary_buffer(CharType* buf, size_t size, deleter d) noexcept
         : _buffer(buf), _size(size), _deleter(std::move(d)) {}
+
+public:
     /// Creates a `temporary_buffer` containing a copy of the provided data
     ///
     /// \param src  data buffer to be copied

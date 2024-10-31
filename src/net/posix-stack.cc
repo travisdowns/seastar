@@ -1163,7 +1163,7 @@ posix_datagram_channel::receive() {
         auto sg_id = internal::scheduling_group_index(current_scheduling_group());
         bytes_received[sg_id] += size;
         return make_ready_future<datagram>(datagram(std::make_unique<posix_datagram>(
-            _recv._src_addr, dst ? *dst : _address, temporary_buffer<char>(_recv._buffer, size, make_deleter([buf = _recv._buffer] { delete[] buf; })))));
+            _recv._src_addr, dst ? *dst : _address, temporary_buffer<char>::maybe_unsafe_from_deleter(_recv._buffer, size, make_deleter([buf = _recv._buffer] { delete[] buf; })))));
     }).handle_exception([p = _recv._buffer](auto ep) {
         delete[] p;
         return make_exception_future<datagram>(std::move(ep));

@@ -533,7 +533,7 @@ public:
             auto size = u.external.size;
             u.external.str = nullptr;
             u.external.size = 0;
-            return temporary_buffer<char_type>(ptr, size, make_free_deleter(ptr));
+            return temporary_buffer<char>::maybe_unsafe_from_deleter(ptr, size, make_free_deleter(ptr));
         } else {
             auto buf = temporary_buffer<char_type>(u.internal.size);
             std::copy(u.internal.str, u.internal.str + u.internal.size, buf.get_write());
