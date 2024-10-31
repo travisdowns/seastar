@@ -111,7 +111,7 @@ public:
     }
 
     virtual future<> send(const socket_address& dst, const char* msg) override {
-        temporary_buffer<char> buf(const_cast<char *>(msg), strlen(msg), deleter());
+        auto buf = temporary_buffer<char>::maybe_unsafe_from_deleter(const_cast<char *>(msg), strlen(msg), deleter());
         return send(dst, std::span(&buf, 1));
     }
 

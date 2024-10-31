@@ -298,7 +298,7 @@ public:
         }
         while (idx < nr_frags()) {
             auto&& f = frag(idx++);
-            func(temporary_buffer<char>(f.base, f.size, _impl->_deleter.share()));
+            func(temporary_buffer<char>::maybe_unsafe_from_deleter(f.base, f.size, _impl->_deleter.share()));
         }
     }
     std::vector<temporary_buffer<char>> release() {
