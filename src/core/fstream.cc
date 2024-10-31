@@ -328,7 +328,7 @@ private:
                     if (start < pos) {
                         tmp.trim_front(pos - start);
                     }
-                    return make_ready_future<temporary_buffer<char>>(temporary_buffer<char>(reinterpret_cast<char*>(tmp.get_write()), tmp.size(), tmp.release()));
+                    return make_ready_future<temporary_buffer<char>>(temporary_buffer<char>::maybe_unsafe_from_deleter(reinterpret_cast<char*>(tmp.get_write()), tmp.size(), tmp.release()));
                 }
             }));
             _remain -= end - _pos;
