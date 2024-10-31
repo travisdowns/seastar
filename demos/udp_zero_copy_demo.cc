@@ -107,7 +107,7 @@ public:
                     if (_copy) {
                         bufs.emplace_back(temporary_buffer<char>(chunk, _chunk_size));
                     } else {
-                        bufs.emplace_back(temporary_buffer<char>(chunk, _chunk_size, deleter()));
+                        bufs.emplace_back(temporary_buffer<char>::maybe_unsafe_from_deleter(chunk, _chunk_size, deleter()));
                     }
                     chunk += _chunk_size;
                 }

@@ -535,7 +535,7 @@ public:
     future<temporary_buffer<CharType>>
     dma_read_bulk(uint64_t offset, size_t range_size, io_intent* intent = nullptr) noexcept {
         return dma_read_bulk_impl(offset, range_size, intent).then([] (temporary_buffer<uint8_t> t) {
-            return temporary_buffer<CharType>(reinterpret_cast<CharType*>(t.get_write()), t.size(), t.release());
+            return temporary_buffer<char>::maybe_unsafe_from_deleter(reinterpret_cast<CharType*>(t.get_write()), t.size(), t.release());
         });
     }
 
