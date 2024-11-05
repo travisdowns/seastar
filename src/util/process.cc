@@ -30,7 +30,7 @@
 
 namespace seastar {
 
-namespace {
+namespace process_internal {
 class pipe_data_source_impl final : public data_source_impl {
     static constexpr std::size_t buffer_size = 8192;
     struct buffer_allocator : public internal::buffer_allocator {
@@ -109,7 +109,7 @@ public:
         return _buffer_size;
     }
 };
-}
+} // namespace process_internal
 
 process::process(create_tag, pid_t pid, file_desc&& cin, file_desc&& cout, file_desc&& cerr)
     : _pid(pid)
@@ -150,15 +150,15 @@ future<process> process::spawn(const std::filesystem::path& pathname) {
 }
 
 output_stream<char> process::cin() {
-    return output_stream<char>(data_sink(pipe_data_sink_impl::from_fd(std::move(_stdin))));
+    return output_stream<char>(data_sink(process_internal::pipe_data_sink_impl::from_fd(std::move(_stdin))));
 }
 
 input_stream<char> process::cout() {
-    return input_stream<char>(data_source(pipe_data_source_impl::from_fd(std::move(_stdout))));
+    return input_stream<char>(data_source(process_internal::pipe_data_source_impl::from_fd(std::move(_stdout))));
 }
 
 input_stream<char> process::cerr() {
-    return input_stream<char>(data_source(pipe_data_source_impl::from_fd(std::move(_stderr))));
+    return input_stream<char>(data_source(process_internal::pipe_data_source_impl::from_fd(std::move(_stderr))));
 }
 
 }
