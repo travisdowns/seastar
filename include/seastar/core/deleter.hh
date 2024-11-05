@@ -28,7 +28,18 @@
 #include <new>
 #include <utility>
 
+// The forward declarations of classes below are used for
+// friending by the deleter.
+struct test_deleter_append_does_not_free_shared_object;
+struct test_deleter_append_same_shared_object_twice;
+
 namespace seastar {
+namespace net {
+    class packet;
+};
+namespace internal {
+    struct wrapped_iovecs;
+}
 
 /// \addtogroup memory-module
 /// @{
@@ -83,11 +94,20 @@ public:
         this->~deleter();
         new (this) deleter(i);
     }
+private:
     /// \endcond
     /// Appends another deleter to this deleter.  When this deleter is
     /// destroyed, both encapsulated actions will be carried out.
+    ///
+    /// This operation is not thread-safe and therefore not made public
+    /// except for a few manually verified uses that are marked as freinds
+    /// below.
     void append(deleter d);
-private:
+    friend class ::seastar::net::packet;
+    friend struct ::test_deleter_append_does_not_free_shared_object;
+    friend struct ::test_deleter_append_same_shared_object_twice;
+    friend struct ::seastar::internal::wrapped_iovecs;
+
     static bool is_raw_object(impl* i) noexcept {
         auto x = reinterpret_cast<uintptr_t>(i);
         return x & 1;
