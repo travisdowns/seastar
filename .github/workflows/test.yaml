@@ -33,6 +33,11 @@ on:
         type: string
         default: ''
         required: false
+      crypto_provider:
+        description: 'cryptographic provider to use'
+        type: string
+        default: 'GnuTLS'
+        required: false
 
 jobs:
   test:
@@ -95,7 +100,9 @@ jobs:
             --mode ${{ inputs.mode }}             \
             $MAYBE_CCACHE_OPT                     \
             ${{ inputs.options }}                 \
-            ${{ inputs.enables }}
+            ${{ inputs.enables }}                 \
+            --crypto-provider                     \
+            ${{ inputs.crypto_provider }}
 
       - name: Build
         run: cmake --build build/${{inputs.mode}}
