@@ -45,6 +45,7 @@ struct disk_params {
     std::optional<uint32_t> physical_block_size; // Override for disks that lie about their physical block size
     bool duplex = false;
     float rate_factor = 1.0;
+    bool max_cost_function = true;
 };
 
 class disk_config_params {
