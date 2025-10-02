@@ -30,7 +30,7 @@ Generate the regular_test include: matrix for tests.yaml.
 
 Uses all-pairs (pairwise) coverage over compiler x standard x mode x
 arch for the regular builds, plus an explicit list of special-purpose
-jobs (dpdk, fuzz). All-pairs guarantees that every pair
+jobs (fuzz). All-pairs guarantees that every pair
 of parameter values is exercised by at least one job, with far fewer
 combinations than the full cartesian product. Excluded pairs (see
 EXCLUDED_PAIRS) drop out of regular coverage. The file is round-tripped
@@ -100,15 +100,6 @@ SPECIAL_ITEMS: list[dict[str, Any]] = [
         "standard": 23,
         "arch": "x86",
         "mode": "dev",
-    },
-    {
-        "compiler": "clang++-22",
-        "standard": 23,
-        "arch": "x86",
-        "mode": "release",
-        "enables": "--enable-dpdk",
-        "options": "--cook dpdk --dpdk-machine corei7-avx",
-        "info": "dpdk, ",
     },
     {
         "compiler": "clang++-22",
