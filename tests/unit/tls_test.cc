@@ -1789,8 +1789,8 @@ SEASTAR_THREAD_TEST_CASE(test_peer_certificate_chain_handling) {
 
         auto ders = {read_file(certfile("test.crt.der"))};
 
-        // We need to take the first certificate from the chain as there is a 
-        // difference between the OpensSSL and GnuTLS, OpenSSL cert chain always 
+        // We need to take the first certificate from the chain as there is a
+        // difference between the OpensSSL and GnuTLS, OpenSSL cert chain always
         // contains the server certifacate.
         BOOST_REQUIRE(std::ranges::equal(std::views::take(ccrts,1), ders));
         BOOST_REQUIRE(std::ranges::equal(std::views::take(scrts,1), ders));
@@ -2318,7 +2318,7 @@ SEASTAR_THREAD_TEST_CASE(test_send_recv_alloc_limits) {
             auto fout = write(sout);
             auto fin = read(cin);
 
-            auto h = (i > 0 && (i & 0xff) == 0) 
+            auto h = (i > 0 && (i & 0xff) == 0)
                 ? BOOST_TEST_MESSAGE("Forcing re-handshake"), tls::force_rehandshake(s.connection)
                 : make_ready_future<>()
                 ;
@@ -2407,4 +2407,40 @@ SEASTAR_THREAD_TEST_CASE(test_session_close_with_unread_data) {
     });
 
     seastar::when_all(std::move(c), std::move(s)).discard_result().get();
+}
+
+SEASTAR_THREAD_TEST_CASE(test_early_server_disconnect) {
+    // This test ensures that we do not crash when the server closes before we wrap
+    // the client in a TLS client
+    tls::credentials_builder b;
+
+    b.set_x509_key_file(certfile("test.crt"), certfile("test.key"), tls::x509_crt_format::PEM).get();
+    b.set_x509_trust_file(certfile("catest.pem"), tls::x509_crt_format::PEM).get();
+
+    auto creds = b.build_certificate_credentials();
+    auto serv = b.build_server_credentials();
+
+    ::listen_options opts;
+    opts.reuse_address = true;
+    opts.set_fixed_cpu(this_shard_id());
+
+    auto addr = ::make_ipv4_address({0x7f000001, 4712});
+    auto server = tls::listen(serv, addr, opts);
+
+    auto sa = server.accept();
+    auto c = engine().connect(addr).get();
+
+    {
+        auto s = sa.get();
+        s.connection.input().close().get();
+        s.connection.output().close().get();
+        s.connection.shutdown_input();
+        s.connection.shutdown_output();
+    }
+
+    // Simulate the server closing the connection early
+    c.input().close().get();
+    c.output().close().get();
+
+    auto _ = tls::wrap_client(creds, std::move(c), tls::tls_options{}).get();
 }
