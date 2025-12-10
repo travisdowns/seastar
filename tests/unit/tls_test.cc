@@ -2326,10 +2326,15 @@ SEASTAR_THREAD_TEST_CASE(test_send_recv_alloc_limits) {
             auto fout = write(sout);
             auto fin = read(cin);
 
+#ifdef SEASTAR_USE_GNUTLS
             auto h = (i > 0 && (i & 0xff) == 0)
                 ? BOOST_TEST_MESSAGE("Forcing re-handshake"), tls::force_rehandshake(s.connection)
                 : make_ready_future<>()
                 ;
+#else
+            // See CORE-14961
+            auto h = seastar::make_ready_future<>();
+#endif
 
             fin.get();
             fout.get();
