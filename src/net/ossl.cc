@@ -1591,6 +1591,10 @@ public:
         });
     }
 
+    future<> force_rehandshake() override {
+        throw std::runtime_error("force_rehandshake() not implemented");
+    }
+
     // This function is called to kick off the handshake.  It will obtain
     // locks on the _in_sem and _out_sem semaphores and start the handshake.
     future<> handshake() {
