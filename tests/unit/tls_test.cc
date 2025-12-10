@@ -1818,8 +1818,12 @@ SEASTAR_THREAD_TEST_CASE(test_skip_wait_for_eof) {
         // Initiate a connection while specifying that it should not wait for eof on shutdown.
         auto sa = server.accept();
         auto c = engine().connect(addr).get();
-        auto c_tls = tls::wrap_client(creds, std::move(c),
-                                      tls::tls_options{.bye_timeout = std::chrono::seconds(0)}).get();
+#ifdef SEASTAR_USE_OPENSSL
+        tls::tls_options options{.wait_for_eof_on_shutdown = false};
+#else
+        tls::tls_options options{.bye_timeout = std::chrono::seconds(0)};
+#endif
+        auto c_tls = tls::wrap_client(creds, std::move(c), options).get();
         auto s = sa.get();
 
         auto in = s.connection.input();
