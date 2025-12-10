@@ -2265,7 +2265,11 @@ SEASTAR_THREAD_TEST_CASE(test_send_recv_alloc_limits) {
     b.set_x509_trust_file(certfile("catest.pem"), tls::x509_crt_format::PEM).get();
     b.set_client_auth(tls::client_auth::REQUIRE);
     b.set_session_resume_mode(tls::session_resume_mode::TLS13_SESSION_TICKET);
+#ifdef SEASTAR_USE_OPENSSL
+    b.set_minimum_tls_version(tls::tls_version::tlsv1_2);
+#elif defined(SEASTAR_USE_GNUTLS)
     b.set_priority_string("SECURE128:+SECURE192:-VERS-TLS-ALL:-VERS-TLS1.2:+VERS-TLS1.3");
+#endif
 
     auto creds = b.build_certificate_credentials();
     auto serv = b.build_server_credentials();
