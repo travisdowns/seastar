@@ -2375,6 +2375,13 @@ static std::pair<connected_socket, connected_socket> tls_socketpair() {
 }
 
 SEASTAR_THREAD_TEST_CASE(test_session_close_with_unread_data) {
+
+#ifdef SEASTAR_USE_OPENSSL
+    // Redpanda: we do not support `wait_for_data_on_shutdown` so this test would fail.
+    // See CORE-14960.
+    return;
+#endif
+
     auto p = tls_socketpair();
 
     auto c = seastar::async([c = std::move(p.first)] () mutable {
