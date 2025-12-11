@@ -223,7 +223,7 @@ static tls::certificate_data get_der_certificate_data(X509* cert) {
         tls::certificate_data der_encoded_cert(len);
         auto ptr = der_encoded_cert.data();
         i2d_X509(cert, &ptr);
-        
+
         std::move(der_encoded_cert.begin(), der_encoded_cert.end(),
                   std::back_inserter(result));
     }
@@ -674,7 +674,7 @@ public:
             } else {
                 _session_ticket_keys = session_ticket_keys(key);
             }
-            
+
         }
     }
 
@@ -968,8 +968,8 @@ public:
                         unsigned int client_proto_len, void* configured_protocols) {
         const std::vector<unsigned char>& server_protos = *reinterpret_cast<std::vector<unsigned char>*>(configured_protocols);
 
-        auto result =  SSL_select_next_proto(const_cast<unsigned char **>(out), 
-            outlen, server_protos.data(), server_protos.size(), 
+        auto result =  SSL_select_next_proto(const_cast<unsigned char **>(out),
+            outlen, server_protos.data(), server_protos.size(),
             client_protos, client_proto_len);
         if(result == OPENSSL_NPN_NEGOTIATED) {
             return SSL_TLSEXT_ERR_OK;
@@ -1160,51 +1160,59 @@ public:
         }
     }
 
-    // Called post locking of the _out_sem
-    // This function takes and holds the sempahore units for _out_sem and
-    // will attempt to send the provided packet.  If a renegotiation is needed
+    future<> do_put(std::vector<temporary_buffer<char>> bufs) {
+        auto i = bufs.begin();
+        auto e = bufs.end();
+        return with_semaphore(_out_sem, 1, [this, i, e] {
+            SEASTAR_ASSERT(_output_pending.available());
+            return do_for_each(i, e, [this](temporary_buffer<char>& b) {
+                return do_put_one(b.get(), b.size());
+            });
+        }).finally([b = std::move(bufs)] {});
+    }
+
+    future<> do_put(temporary_buffer<char> buf) {
+        auto ptr = buf.get();
+        auto size = buf.size();
+        return with_semaphore(_out_sem, 1, [this, ptr, size] {
+            SEASTAR_ASSERT(_output_pending.available());
+            return do_put_one(ptr, size);
+        }).finally([b = std::move(buf)] {});
+    }
+
+    // Called post locking of the _out_sem, which should be held until
+    // the returned future resolves.
+    // Will attempt to send the provided packet.  If a renegotiation is needed
     // any unprocessed part of the packet is returned.
-    future<> do_put(net::packet p) {
+    future<> do_put_one(const char* ptr, size_t size) {
         tls_log.trace("{} do_put", *this);
         SEASTAR_ASSERT(_output_pending.available());
-        return do_with(std::move(p),
-            [this](net::packet& p) {
-                // This do_until runs until either a renegotiation occurs or the packet is empty
-                return do_until(
-                    [this, &p] { return eof() || p.len() == 0;},
-                    [this, &p]() mutable {
-                        std::string_view frag_view =
-                            {p.fragments().begin()->base, p.fragments().begin()->size};
-                        return repeat([this, frag_view, &p]() mutable {
-                            if (frag_view.empty()) {
-                                return make_ready_future<stop_iteration>(stop_iteration::yes);
-                            }
-                            size_t bytes_written = 0;
-                            auto write_rc = SSL_write_ex(
-                                _ssl.get(), frag_view.data(), frag_view.size(), &bytes_written);
-                            tls_log.trace("{} do_put: SSL_write_ex: {}", *this, write_rc);
-                            if (write_rc != 1) {
-                                const auto ssl_err = SSL_get_error(_ssl.get(), write_rc);
-                                tls_log.trace("{} do_put: SSL_get_error: {}", *this, ssl_err);
-                                return handle_do_put_ssl_err(ssl_err);
-                            } else {
-                                tls_log.trace("{} do_put: bytes_written: {}", *this, bytes_written);
-                                frag_view.remove_prefix(bytes_written);
-                                p.trim_front(bytes_written);
-                                return wait_for_output().then([] {
-                                    return stop_iteration::no;
-                                });
-                            }
-                        });
-                    }
-                );
+
+        // This do_until runs until either a renegotiation occurs or the packet is empty
+        while (!eof() && size > 0) {
+            size_t bytes_written = 0;
+            auto write_rc = SSL_write_ex(_ssl.get(), ptr, size, &bytes_written);
+            tls_log.trace("{} do_put: SSL_write_ex: {}", *this, write_rc);
+            if (write_rc != 1) {
+                const auto ssl_err = SSL_get_error(_ssl.get(), write_rc);
+                tls_log.trace("{} do_put: SSL_get_error: {}", *this, ssl_err);
+                auto should_stop = co_await handle_do_put_ssl_err(ssl_err);
+                if (should_stop == stop_iteration::yes) {
+                    co_return;
+                }
+            } else {
+                SEASTAR_ASSERT(bytes_written <= size);
+                tls_log.trace("{} do_put: bytes_written: {}", *this, bytes_written);
+                ptr += bytes_written;
+                size -= bytes_written;
+                co_await wait_for_output();
             }
-        );
+        }
     }
 
     // Used to push unencrypted data through OpenSSL, which will
     // encrypt it and then place it into the output bio.
-    future<> put(net::packet p) override {
+    future<> put(std::span<temporary_buffer<char>> bufs) override {
         tls_log.trace("{} put", *this);
         constexpr size_t openssl_max_record_size = 16 * 1024;
         if (_error) {
@@ -1216,8 +1224,16 @@ public:
         }
         if (!connected()) {
             tls_log.trace("{} put: not connected, performing handshake", *this);
-            return handshake().then(
-              [this, p = std::move(p)]() mutable { return put(std::move(p)); });
+            std::vector<temporary_buffer<char>> p;
+            p.reserve(bufs.size());
+            p.insert(p.end(), std::make_move_iterator(bufs.begin()), std::make_move_iterator(bufs.end()));
+            return handshake().then([this, p = std::move(p)]() mutable {
+               return put(std::span(p));
+            });
+        }
+
+        if (bufs.size() == 1) {
+            return do_put(std::move(bufs.front()));
         }
 
         // We want to make sure that we write to the underlying bio with as large
@@ -1226,12 +1242,21 @@ public:
         // encryption/decryption faster. Hence to avoid cases where we would do
         // an extra syscall for something like a 100 bytes header we linearize the
         // packet if it's below the max TLS record size.
-        if (p.nr_frags() > 1 && p.len() <= openssl_max_record_size) {
-            p.linearize();
+        size_t size = std::accumulate(bufs.begin(), bufs.end(), size_t(0), [] (size_t s, const auto& b) { return s + b.size(); });
+        if (size <= openssl_max_record_size) {
+            temporary_buffer<char> linear(size);
+            char* pos = linear.get_write();
+            for (auto& buf : bufs) {
+                std::copy_n(buf.get(), buf.size(), pos);
+                pos += buf.size();
+            }
+            return do_put(std::move(linear));
         }
-        return with_semaphore(_out_sem, 1, [this, p = std::move(p)]() mutable {
-            return do_put(std::move(p));
-        });
+
+        std::vector<temporary_buffer<char>> p;
+        p.reserve(bufs.size());
+        p.insert(p.end(), std::make_move_iterator(bufs.begin()), std::make_move_iterator(bufs.end()));
+        return do_put(std::move(p));
     }
 
     // Called after locking the _in_sem and _out_sem semaphores.
