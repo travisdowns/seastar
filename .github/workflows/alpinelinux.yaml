@@ -53,6 +53,7 @@ jobs:
     - name: Configure build
       run: |
         cmake -B build -G Ninja            \
+         -DSeastar_API_LEVEL=8             \
          -DCMAKE_BUILD_TYPE=RelWithDebInfo \
          -DSeastar_USE_OPENSSL=yes         \
          -DSeastar_DOCS=OFF
