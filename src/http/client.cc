@@ -25,7 +25,6 @@ module;
 
 #include <cassert>
 #include <concepts>
-#include <gnutls/gnutls.h>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -45,6 +44,11 @@ module seastar;
 #include <seastar/util/defer.hh>
 #include <seastar/util/short_streams.hh>
 #include <seastar/util/string_utils.hh>
+
+#ifdef SEASTAR_USE_GNUTLS
+#include <gnutls/gnutls.h>
+#endif
+
 #endif
 
 namespace seastar {
