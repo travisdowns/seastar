@@ -70,7 +70,8 @@ struct request {
     // deprecated: it is used to store last value of query parameters, but will be removed in the future
     [[deprecated("Use helper methods instead")]] std::unordered_map<sstring, sstring> query_parameters;
     httpd::parameters param;
-    [[deprecated("use content_stream (server-side) / write_body (client-side) instead")]]
+    // undo this deprecation until CORE-15051 is addressed
+    // [[deprecated("use content_stream (server-side) / write_body (client-side) instead")]]
     sstring content; // server-side deprecated: use content_stream instead
     /*
      * The handler should read the contents of this stream till reaching eof (i.e., the end of this request's content). Failing to do so
