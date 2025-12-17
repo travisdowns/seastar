@@ -1600,7 +1600,10 @@ public:
     // Unless wait_for_eof_on_shutdown is false
     future<> wait_for_eof() {
         tls_log.trace("{} wait_for_eof", *this);
+SEASTAR_INTERNAL_BEGIN_IGNORE_DEPRECATIONS
+        // see CORE-14958 for tracking on this deprecation
         if (!_options.wait_for_eof_on_shutdown) {
+SEASTAR_INTERNAL_END_IGNORE_DEPRECATIONS
             // Seastar option to allow users to just bypass EOF waiting
             return make_ready_future();
         }
