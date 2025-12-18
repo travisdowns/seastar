@@ -2267,7 +2267,7 @@ SEASTAR_THREAD_TEST_CASE(test_send_recv_alloc_limits) {
     b.set_client_auth(tls::client_auth::REQUIRE);
     b.set_session_resume_mode(tls::session_resume_mode::TLS13_SESSION_TICKET);
 #ifdef SEASTAR_USE_OPENSSL
-    b.set_minimum_tls_version(tls::tls_version::tlsv1_2);
+    b.set_minimum_tls_version(tls::tls_version::tlsv1_3);
 #elif defined(SEASTAR_USE_GNUTLS)
     b.set_priority_string("SECURE128:+SECURE192:-VERS-TLS-ALL:-VERS-TLS1.2:+VERS-TLS1.3");
 #endif
