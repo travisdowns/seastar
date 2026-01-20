@@ -159,7 +159,6 @@ public:
         _cpu_cycles_retired_counter.disable();
     }
 
-    [[gnu::always_inline]] [[gnu::hot]]
     void start_run() {
         _total_time = { };
         _total_stats = {};
@@ -169,7 +168,6 @@ public:
         _start_stats = perf_stats::snapshot(&_instructions_retired_counter, &_cpu_cycles_retired_counter);
     }
 
-    [[gnu::always_inline]] [[gnu::hot]]
     performance_test::run_result stop_run() {
         auto t = clock_type::now();
         performance_test::run_result ret;
@@ -184,13 +182,11 @@ public:
         return ret;
     }
 
-    [[gnu::always_inline]] [[gnu::hot]]
     void start_iteration() {
         _start_time = clock_type::now();
         _start_stats = perf_stats::snapshot(&_instructions_retired_counter, &_cpu_cycles_retired_counter);
     }
 
-    [[gnu::always_inline]] [[gnu::hot]]
     void stop_iteration() {
         auto t = clock_type::now();
         _total_time += t - _start_time;
