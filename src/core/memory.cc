@@ -883,7 +883,11 @@ cpu_pages::allocate_large_and_trim(unsigned n_pages, bool should_sample) {
 void
 cpu_pages::warn_large_allocation(size_t size) {
     alloc_stats::increment_local(alloc_stats::types::large_allocs);
-    seastar_memory_logger.warn("oversized allocation: {} bytes. This is non-fatal, but could lead to latency and/or fragmentation issues. Please report: at {}", size, current_backtrace());
+    if (fallback_to_system_nest_count) {
+        seastar_memory_logger.debug("large allocation: {} bytes (in scoped fallback mode)", size);
+    } else {
+        seastar_memory_logger.warn("oversized allocation: {} bytes. This is non-fatal, but could lead to latency and/or fragmentation issues. Please report: at {}", size, current_backtrace());
+    }
 }
 
 allocation_site_ptr
