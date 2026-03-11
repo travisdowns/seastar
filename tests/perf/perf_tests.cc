@@ -617,7 +617,7 @@ static const std::vector<column> common_columns{
     {"tasks"   ,  3, [](const result& r) { return r.tasks;               }},
     {"inst"    ,  2, [](const result& r) { return r.inst;                }},
     {"cycles"  ,  1, [](const result& r) { return r.cycles;              }},
-    {"overhead",  1, [](const result& r) { return r.overhead;            }},
+    {"overhead",  3, [](const result& r) { return r.overhead;            }},
 };
 // json columns
 static const std::vector<column> json_columns = [] {
