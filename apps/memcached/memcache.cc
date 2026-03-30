@@ -893,7 +893,7 @@ private:
 private:
     static void append(std::vector<temporary_buffer<char>>& bufs, const char* buf, size_t size) {
         if (size) {
-            bufs.emplace_back(const_cast<char*>(buf), size, deleter());
+            bufs.push_back(temporary_buffer<char>::maybe_unsafe_from_deleter(const_cast<char*>(buf), size, deleter()));
         }
     }
 
@@ -917,7 +917,7 @@ private:
 
         append(bufs, msg_crlf);
         append(bufs, item->value());
-        bufs.emplace_back(const_cast<char*>(msg_crlf), strlen(msg_crlf), make_deleter([item = std::move(item)]{}));
+        bufs.push_back(temporary_buffer<char>::maybe_unsafe_from_deleter(const_cast<char*>(msg_crlf), strlen(msg_crlf), make_deleter([item = std::move(item)]{})));
     }
 
     template <bool WithVersion>
