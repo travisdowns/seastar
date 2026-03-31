@@ -160,6 +160,10 @@ public:
     virtual void set_maximum_tls_version(tls_version) {}
     virtual void enable_tls_renegotiation() {}
 
+    // Certificate info accessors — default no-op for backends that don't implement.
+    virtual std::vector<cert_info> get_x509_info() const { return {}; }
+    virtual std::vector<cert_info> get_x509_trust_list_info() const { return {}; }
+
     // Flag for lazy system trust loading.
     bool _load_system_trust = false;
 };
