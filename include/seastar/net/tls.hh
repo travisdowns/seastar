@@ -199,7 +199,23 @@ namespace tls {
          */
         future<> set_system_trust();
 
-        // TODO add methods for certificate verification
+        /**
+         * Retrieve information about the loaded certificate(s).
+         *
+         * Returns a std::vector of cert_info, each extracted from a loaded
+         * certificate. If no certificates have been loaded, the returned
+         * optional is empty.
+         */
+        std::optional<std::vector<cert_info>> get_cert_info() const noexcept;
+
+        /**
+         * Retrieve information about the loaded current trust list.
+         *
+         * Returns a std::vector of cert_info, each extracted from a CA in the
+         * trust list. If no trust list has been loaded, the returned optional
+         * is empty.
+         */
+        std::optional<std::vector<cert_info>> get_trust_list_info() const noexcept;
 
         /**
          * TLS handshake priority string. See gnutls docs and syntax at

@@ -22,6 +22,7 @@
 #pragma once
 
 #include <chrono>
+#include <cstddef>
 #include <memory>
 #include <vector>
 #include <cstring>
@@ -190,6 +191,12 @@ struct connected_socket_input_stream_config final {
     /// buffer sizes if it sees a tendency towards large requests, but will not go
     /// above this buffer size.
     unsigned max_buffer_size = 128 * 1024;
+};
+
+/// Certificate information (serial number and expiry)
+struct cert_info {
+    std::vector<std::byte> serial;
+    time_t expiry;
 };
 
 /// Distinguished name
