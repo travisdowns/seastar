@@ -725,6 +725,30 @@ future<shared_ptr<tls::server_credentials>> tls::credentials_builder::build_relo
     }, tolerance);
 }
 
+tls::reload_callback_ex wrap_reload_callback(tls::reload_callback_with_creds cb) {
+    return [cb{std::move(cb)}](const tls::credentials_builder& builder,
+                               const std::unordered_set<sstring> &files,
+                               std::exception_ptr ep) {
+         auto creds = builder.build_certificate_credentials();
+         return futurize_invoke(cb, files, *creds, ep, builder.get_trust_file_blob());
+    };
+}
+
+future<shared_ptr<tls::certificate_credentials>> tls::credentials_builder::build_reloadable_certificate_credentials(reload_callback_with_creds cb, std::optional<std::chrono::milliseconds> tolerance) const {
+    return build_reloadable_certificate_credentials(wrap_reload_callback(std::move(cb)), tolerance);
+}
+
+future<shared_ptr<tls::server_credentials>> tls::credentials_builder::build_reloadable_server_credentials(reload_callback_with_creds cb, std::optional<std::chrono::milliseconds> tolerance) const {
+    return build_reloadable_server_credentials(wrap_reload_callback(std::move(cb)), tolerance);
+}
+
+std::optional<tls::blob> tls::credentials_builder::get_trust_file_blob() const {
+    if (auto i = _blobs.find(x509_trust_key); i != _blobs.end()) {
+        return std::make_optional<tls::blob>(std::any_cast<const x509_simple&>(i->second).data);
+    }
+    return std::nullopt;
+}
+
 const std::error_category& tls::error_category() {
     return internal::crypto::provider().get_tls_backend().error_category();
 }
