@@ -352,6 +352,26 @@ private:
 
 namespace tls {
 
+static std::vector<std::byte> extract_x509_serial(X509* cert) {
+    constexpr size_t serial_max = 160;
+    const ASN1_INTEGER *serial_no = X509_get_serialNumber(cert);
+    const size_t serial_size = std::min(serial_max, (size_t)serial_no->length);
+    std::vector<std::byte> serial(
+        reinterpret_cast<std::byte*>(serial_no->data),
+        reinterpret_cast<std::byte*>(serial_no->data + serial_size));
+    return serial;
+}
+
+static time_t extract_x509_expiry(X509* cert) {
+    const ASN1_TIME *not_after = X509_get0_notAfter(cert);
+    if (not_after != nullptr) {
+        tm tm_struct{};
+        ASN1_TIME_to_tm(not_after, &tm_struct);
+        return mktime(&tm_struct);
+    }
+    return -1;
+}
+
 class openssl_provider_certificate_credentials_impl : public tls::credentials_impl {
     struct certkey_pair {
         x509_ptr cert;
@@ -697,6 +717,34 @@ private:
 
     bool need_load_system_trust() const {
         return _load_system_trust;
+    }
+
+    std::vector<cert_info> get_x509_info() const override {
+        if (_cert_and_key.cert) {
+            return {
+                cert_info{
+                    .serial = extract_x509_serial(_cert_and_key.cert.get()),
+                    .expiry = extract_x509_expiry(_cert_and_key.cert.get())}
+            };
+        }
+        return {};
+    }
+
+    std::vector<cert_info> get_x509_trust_list_info() const override {
+        std::vector<cert_info> cert_infos;
+        STACK_OF(X509_OBJECT) *chain = X509_STORE_get0_objects(_creds.get());
+        auto num_elements = sk_X509_OBJECT_num(chain);
+        for (auto i = 0; i < num_elements; i++) {
+            auto object = sk_X509_OBJECT_value(chain, i);
+            auto type = X509_OBJECT_get_type(object);
+            if (type == X509_LU_X509) {
+                auto cert = X509_OBJECT_get0_X509(object);
+                cert_infos.push_back(cert_info{
+                        .serial = extract_x509_serial(cert),
+                        .expiry = extract_x509_expiry(cert)});
+            }
+        }
+        return cert_infos;
     }
 
     certkey_pair _cert_and_key;

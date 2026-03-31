@@ -284,6 +284,30 @@ void tls::certificate_credentials::enable_tls_renegotiation() {
     _impl->enable_tls_renegotiation();
 }
 
+std::optional<std::vector<cert_info>> tls::certificate_credentials::get_cert_info() const noexcept {
+    if (_impl == nullptr) {
+        return std::nullopt;
+    }
+    try {
+        auto result = _impl->get_x509_info();
+        return result;
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+std::optional<std::vector<cert_info>> tls::certificate_credentials::get_trust_list_info() const noexcept {
+    if (_impl == nullptr) {
+        return std::nullopt;
+    }
+    try {
+        auto result = _impl->get_x509_trust_list_info();
+        return result;
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
 tls::server_credentials::server_credentials()
 {}
 

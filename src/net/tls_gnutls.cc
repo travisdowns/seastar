@@ -32,6 +32,7 @@
 #include <numeric>
 
 #include <seastar/util/assert.hh>
+#include <seastar/util/defer.hh>
 
 #include <netinet/in.h>
 #include <sys/stat.h>
@@ -312,6 +313,15 @@ struct gnutls_datum : public gnutls_datum_t {
 
 namespace tls {
 
+static std::vector<std::byte> extract_x509_serial(gnutls_x509_crt_t cert) {
+    constexpr size_t serial_max = 128;
+    size_t serial_size{serial_max};
+    std::vector<std::byte> serial(serial_size);
+    gtls_chk(gnutls_x509_crt_get_serial(cert, serial.data(), &serial_size));
+    serial.resize(serial_size);
+    return serial;
+}
+
 class gnutls_provider_certificate_credentials_impl: public gnutlsobj, public credentials_impl {
 public:
     gnutls_provider_certificate_credentials_impl()
@@ -433,6 +443,50 @@ public:
 private:
     friend class credentials_builder;
     friend class session;
+
+    std::vector<cert_info> get_x509_info() const override {
+        gnutls_x509_crt_t *crt_list{};
+        unsigned int crt_list_size{};
+        gtls_chk(gnutls_certificate_get_x509_crt(*this, 0, &crt_list, &crt_list_size));
+        auto cleanup = defer([&crt_list, crt_list_size]() noexcept {
+            for (unsigned int i = 0; i < crt_list_size; ++i) {
+                gnutls_x509_crt_deinit(crt_list[i]);
+            }
+            gnutls_free(crt_list);
+        });
+
+        std::vector<cert_info> result;
+        result.reserve(crt_list_size);
+
+        for (unsigned int i = 0; i < crt_list_size; ++i) {
+            cert_info info = {
+                .serial = extract_x509_serial(crt_list[i]),
+                .expiry = gnutls_x509_crt_get_expiration_time(crt_list[i]),
+            };
+            result.emplace_back(std::move(info));
+        }
+        return result;
+    }
+
+    std::vector<cert_info> get_x509_trust_list_info() const override {
+        gnutls_x509_trust_list_t tlist{};
+        gnutls_certificate_get_trust_list(*this, &tlist);
+        gnutls_x509_trust_list_iter_t iter{};
+        gnutls_x509_crt_t cert{};
+
+        std::vector<cert_info> result;
+        while (GNUTLS_E_REQUESTED_DATA_NOT_AVAILABLE !=
+               gnutls_x509_trust_list_iter_get_ca(tlist, &iter, &cert)) {
+            cert_info info = {
+                .serial = extract_x509_serial(cert),
+                .expiry = gnutls_x509_crt_get_expiration_time(cert),
+            };
+            result.emplace_back(std::move(info));
+            gnutls_x509_crt_deinit(cert);
+        }
+
+        return result;
+    }
 
     bool need_load_system_trust() const {
         return _load_system_trust;
