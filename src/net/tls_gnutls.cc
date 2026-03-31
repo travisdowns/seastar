@@ -1254,6 +1254,12 @@ public:
             return extract_dn_information();
         });
     }
+    future<std::optional<session_dn>> get_distinguished_name(dn_format) override {
+        // Ignoring parameter as GnuTLS does not provide a mechanism to change the format
+        return state_checked_access([this] {
+            return extract_dn_information();
+        });
+    }
     future<std::vector<subject_alt_name>> get_alt_name_information(std::unordered_set<subject_alt_name_type> types) override {
         return state_checked_access([this](std::unordered_set<subject_alt_name_type> types) {
             std::vector<subject_alt_name> res;

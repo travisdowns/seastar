@@ -561,6 +561,13 @@ namespace tls {
      */
     future<std::optional<session_dn>> get_dn_information(connected_socket& socket);
 
+    enum class dn_format {
+        legacy, // legacy format
+        rfc2253
+    };
+
+    future<std::optional<session_dn>> get_dn_information(connected_socket& socket, dn_format format);
+
     /**
      * Force a re-handshake (session key renegotiotion on TLS1.3).
      * Can only be called on a server side socket.
