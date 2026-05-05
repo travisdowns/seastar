@@ -1703,6 +1703,10 @@ private:
         char buf[256];
         ERR_error_string_n(err, buf, sizeof(buf));
         tls_log.warn("{} stale error on queue before {}: {}", *this, operation, buf);
+        // OpenSSL's API contract is too loose, and the impact too wide
+        // (e.g., low-priority HTTPS traffic could crash the whole process)
+        // to terminate in release builds. Use plain assert() which fires only in debug.
+        assert(0 && "stale errors on OpenSSL error queue");
     }
 
     std::vector<subject_alt_name> do_get_alt_name_information(const x509_ptr &peer_cert,
