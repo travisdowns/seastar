@@ -112,9 +112,19 @@ crypto_provider& provider();
 
 /// \brief Install the process-wide crypto provider.
 ///
-/// Must be called exactly once, before any call to provider().
-/// Ownership is transferred to the crypto subsystem.
+/// Must be called exactly once per \c set_provider / \c reset_provider
+/// cycle, before any call to \ref provider(). Ownership is transferred
+/// to the crypto subsystem.
 void set_provider(std::unique_ptr<crypto_provider> p);
+
+/// \brief Tear down the process-wide crypto provider installed by
+/// \ref set_provider.
+///
+/// Called from \c smp::cleanup() so that a subsequent \c app::run()
+/// (and the \c smp::configure() it triggers) starts from a clean slate
+/// and can call \ref set_provider again. Safe to call when no provider
+/// is installed.
+void reset_provider();
 
 #ifdef SEASTAR_HAVE_GNUTLS
 /// \brief Create a GnuTLS-backed crypto provider.

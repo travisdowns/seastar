@@ -35,6 +35,10 @@ void set_provider(std::unique_ptr<crypto_provider> p) {
     provider().get_tls_backend().init_error_codes();
 }
 
+void reset_provider() {
+    the_provider.reset();
+}
+
 md5_hasher make_md5_hasher() {
     return provider().make_md5_hasher();
 }

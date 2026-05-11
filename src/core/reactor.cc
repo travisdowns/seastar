@@ -4143,6 +4143,7 @@ void smp::cleanup() noexcept {
     _shard_to_numa_node_mapping = decltype(_shard_to_numa_node_mapping)();
     reactor_holder.reset();
     local_engine = nullptr;
+    internal::crypto::reset_provider();
 }
 
 void smp::cleanup_cpu() {
