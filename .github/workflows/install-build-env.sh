@@ -72,8 +72,14 @@ fi
 # 10.1.1, and clang-20+ enforces consteval strictly enough to reject
 # fmt/chrono.h's FMT_STRING("{:.{}f}") path. clang-19 and the gcc
 # matrix items work fine with the system fmt.
+#
+# For C++26, cook fmt-12-1-dev instead: see seastar issue #3411 —
+# libstdc++-16 makes std::optional model std::ranges::range, which
+# tripped two overlapping formatter specializations in fmt 11.x/12.x.
 cook_args=()
-if [[ "$COMPILER" == clang++-* ]]; then
+if [ "$STANDARD" = "26" ]; then
+    cook_args=(--cook fmt-12-1-dev)
+elif [[ "$COMPILER" == clang++-* ]]; then
     clang_ver="${COMPILER#clang++-}"
     if [ "$clang_ver" -ge 20 ]; then
         cook_args=(--cook fmt)
