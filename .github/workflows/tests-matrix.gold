@@ -1,0 +1,15 @@
+Fuzz Tests
+Test (clang++, C++20, debug)
+Test (clang++, C++20, dev)
+Test (clang++, C++20, release)
+Test (clang++, C++23, debug)
+Test (clang++, C++23, dev)
+Test (clang++, C++23, release)
+Test (g++, C++20, debug)
+Test (g++, C++20, dev)
+Test (g++, C++20, release)
+Test (g++, C++23, debug)
+Test (g++, C++23, dev)
+Test (g++, C++23, release)
+Test with C++20 modules enabled
+Test with DPDK enabled
