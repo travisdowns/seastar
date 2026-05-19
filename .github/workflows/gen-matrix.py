@@ -60,6 +60,18 @@ SPECIAL_ITEMS: list[dict[str, Any]] = [
     },
     {
         "compiler": "clang++-22",
+        "standard": 26,
+        "arch": "x86",
+        "mode": "dev",
+    },
+    {
+        "compiler": "g++-16",
+        "standard": 26,
+        "arch": "x86",
+        "mode": "dev",
+    },
+    {
+        "compiler": "clang++-22",
         "standard": 23,
         "arch": "x86",
         "mode": "release",
