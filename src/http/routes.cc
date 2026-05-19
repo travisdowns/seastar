@@ -102,7 +102,7 @@ future<std::unique_ptr<http::reply> > routes::handle(const sstring& path, std::u
             return r.handle_exception(_general_handler);
         } catch (const redirect_exception& _e) {
             *rep = _e.to_reply();
-            rep->done("json");
+            rep->set_content_type("json");
         } catch (...) {
             rep = exception_reply(std::current_exception());
         }
