@@ -3030,3 +3030,68 @@ void compile_tests() {
     static_assert(std::is_same_v<function_traits<decltype(many_args)>::arg<3>::type, char>);
     static_assert(std::is_same_v<function_traits<decltype(many_args)>::arg<7>::type, std::string>);
 }
+
+#ifndef SEASTAR_SHUFFLE_TASK_QUEUE
+
+// Runs a two-link chain whose first link finishes while three other tasks are
+// pending, and checks that the second link runs before them: resolving a
+// promise from a continuation that returns a value, or returns nothing, puts
+// the waiting task at the front of the reactor's queue, as returning an
+// already-ready future does.
+//
+// Guarded because debug builds deliberately shuffle the task queue, where
+// scheduling order is not observable.
+//
+// Note that with SEASTAR_TYPE_ERASE_MORE (dev and debug builds) the functor is
+// type-erased behind a noncopyable_function returning a future, so a plain
+// value return reaches the promise already wrapped in a ready future and takes
+// the forward_to() path. These cases exercise the value and void branches of
+// satisfy_with_result_of() in release builds, and are a no-regression control
+// elsewhere.
+template <typename MakeChain>
+static void check_waiter_runs_before_pending_tasks(MakeChain&& make_chain) {
+    std::vector<int> order;
+    promise<> start;
+    auto chain = make_chain(start.get_future(), order);
+
+    // Queue the first link ahead of the background tasks, so that it is running
+    // while they are pending.
+    start.set_value();
+    for (int i = 0; i < 3; i++) {
+        schedule(make_task([&order, i] {
+            order.push_back(10 + i);
+        }));
+    }
+
+    while (order.size() < 5) {
+        thread::yield();
+    }
+    chain.get();
+
+    const std::vector<int> expected = {1, 2, 10, 11, 12};
+    BOOST_REQUIRE_EQUAL_COLLECTIONS(order.begin(), order.end(), expected.begin(), expected.end());
+}
+
+SEASTAR_THREAD_TEST_CASE(test_continuation_returning_value_resumes_waiter_urgently) {
+    check_waiter_runs_before_pending_tasks([] (future<> f, std::vector<int>& order) {
+        return std::move(f).then([&order] {
+            order.push_back(1);
+            return 42;
+        }).then([&order] (int v) {
+            BOOST_REQUIRE_EQUAL(v, 42);
+            order.push_back(2);
+        });
+    });
+}
+
+SEASTAR_THREAD_TEST_CASE(test_continuation_returning_void_resumes_waiter_urgently) {
+    check_waiter_runs_before_pending_tasks([] (future<> f, std::vector<int>& order) {
+        return std::move(f).then([&order] {
+            order.push_back(1);
+        }).then([&order] {
+            order.push_back(2);
+        });
+    });
+}
+
+#endif

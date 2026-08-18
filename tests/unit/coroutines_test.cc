@@ -1078,3 +1078,48 @@ SEASTAR_TEST_CASE(test_co_return_move_counter) {
         }
     }
 }
+
+#ifndef SEASTAR_SHUFFLE_TASK_QUEUE
+
+static future<int> co_return_when(future<> f, std::vector<int>& order) {
+    co_await std::move(f);
+    order.push_back(1);
+    co_return 42;
+}
+
+// A coroutine's co_return resumes its awaiting caller from the front of the
+// reactor's queue, so the caller runs before tasks that were queued while the
+// callee was still suspended.
+//
+// Guarded because debug builds deliberately shuffle the task queue, where
+// scheduling order is not observable.
+static future<> co_await_then_record(future<> f, std::vector<int>& order) {
+    auto v = co_await co_return_when(std::move(f), order);
+    BOOST_REQUIRE_EQUAL(v, 42);
+    order.push_back(2);
+}
+
+SEASTAR_TEST_CASE(test_co_return_resumes_awaiter_urgently) {
+    std::vector<int> order;
+    seastar::promise<> start;
+    auto caller = co_await_then_record(start.get_future(), order);
+
+    // Queue the callee's resumption ahead of the background tasks, so that it
+    // is running while they are pending.
+    start.set_value();
+    for (int i = 0; i < 3; i++) {
+        seastar::schedule(seastar::make_task([&order, i] {
+            order.push_back(10 + i);
+        }));
+    }
+
+    while (order.size() < 5) {
+        co_await seastar::yield();
+    }
+    co_await std::move(caller);
+
+    const std::vector<int> expected = {1, 2, 10, 11, 12};
+    BOOST_REQUIRE_EQUAL_COLLECTIONS(order.begin(), order.end(), expected.begin(), expected.end());
+}
+
+#endif
