@@ -1001,6 +1001,18 @@ public:
         }
     }
 
+    // Like set_value(), but schedules the waiting task at the front of the
+    // reactor's queue rather than the back, as set_urgent_state() does for a
+    // value that is already wrapped in a ready future.
+    template<typename U>
+    requires std::is_convertible_v<U&&, stored_type>
+    void set_value_urgent(U&& v) noexcept {
+        if (auto *s = get_state()) {
+            s->set(std::forward<U>(v));
+            make_ready<urgent::yes>();
+        }
+    }
+
     template <typename... A>
     void emplace_value(A&&... a) noexcept {
         if (auto *s = get_state()) {
@@ -2268,11 +2280,11 @@ void futurize<T>::satisfy_with_result_of(promise_base_with_type&& pr, Func&& fun
     using ret_t = decltype(func());
     if constexpr (std::is_void_v<ret_t>) {
         func();
-        pr.set_value(internal::monostate{});
+        pr.set_value_urgent(internal::monostate{});
     } else if constexpr (is_future<ret_t>::value) {
         func().forward_to(std::move(pr));
     } else {
-        pr.set_value(func());
+        pr.set_value_urgent(func());
     }
 }
 
