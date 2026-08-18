@@ -1001,6 +1001,18 @@ public:
         }
     }
 
+    // Like set_value(), but schedules the waiting task at the front of the
+    // reactor's queue rather than the back, as set_urgent_state() does for a
+    // value that is already wrapped in a ready future.
+    template<typename U>
+    requires std::is_convertible_v<U&&, stored_type>
+    void set_value_urgent(U&& v) noexcept {
+        if (auto *s = get_state()) {
+            s->set(std::forward<U>(v));
+            make_ready<urgent::yes>();
+        }
+    }
+
     template <typename... A>
     void emplace_value(A&&... a) noexcept {
         if (auto *s = get_state()) {
@@ -1014,6 +1026,14 @@ public:
         if (auto *s = get_state()) {
             s->set_loose_type_conversion(std::forward<A>(a)...);
             make_ready<urgent::no>();
+        }
+    }
+
+    template <typename... A>
+    void set_value_loose_type_conversion_urgent(A&&... a) noexcept {
+        if (auto *s = get_state()) {
+            s->set_loose_type_conversion(std::forward<A>(a)...);
+            make_ready<urgent::yes>();
         }
     }
 
@@ -1113,6 +1133,13 @@ public:
         set_value(internal::monostate{});
     }
 
+    /// \brief Sets the promises value for T=void, urgently
+    ///
+    /// pr.set_value_urgent();
+    void set_value_urgent() noexcept requires std::is_void_v<T> {
+        set_value_urgent(internal::monostate{});
+    }
+
 #if SEASTAR_API_LEVEL < 10
     /// \brief Sets the promises value
     ///
@@ -1131,6 +1158,15 @@ public:
     void set_value(A&&... a) noexcept {
         internal::promise_base_with_type<T>::set_value_loose_type_conversion(std::forward<A>(a)...);
     }
+
+    /// \brief Sets the promises value, resuming the waiter urgently
+    ///
+    /// As set_value(), but the task waiting on the associated future is
+    /// scheduled at the front of the reactor's queue.
+    template <typename... A>
+    void set_value_urgent(A&&... a) noexcept {
+        internal::promise_base_with_type<T>::set_value_loose_type_conversion_urgent(std::forward<A>(a)...);
+    }
 #else
     /// \brief Sets the promises value
     ///
@@ -1147,6 +1183,17 @@ public:
         internal::promise_base_with_type<T>::set_value(std::forward<accepted_type>(value));
     }
 
+    /// \brief Sets the promises value, resuming the waiter urgently
+    ///
+    /// As set_value(), but the task waiting on the associated future is
+    /// scheduled at the front of the reactor's queue.
+    ///
+    /// This non-templated override only exists to support co_returning
+    /// a braced-init-list.
+    void set_value_urgent(accepted_type&& value) noexcept {
+        internal::promise_base_with_type<T>::set_value_urgent(std::forward<accepted_type>(value));
+    }
+
     /// \brief Sets the promises value using the declared type rvalue reference
     ///
     /// Forwards the argument and makes them available to the associated
@@ -1158,6 +1205,10 @@ public:
     /// pr.set_value(std::move(my_value));
     /// pr.set_value(var); // invokes copy constructor
     using internal::promise_base_with_type<T>::set_value;
+
+    /// \brief Sets the promises value using the declared type rvalue
+    /// reference, resuming the waiter urgently
+    using internal::promise_base_with_type<T>::set_value_urgent;
 #endif
 
     /// \brief Sets the promises value by constructing it in place
