@@ -98,7 +98,7 @@ public:
 #if SEASTAR_API_LEVEL < 10
         template<typename U>
         void return_value(U&& value) {
-            _promise.set_value(std::forward<U>(value));
+            _promise.set_value_urgent(std::forward<U>(value));
         }
 
         [[deprecated("Forwarding coroutine returns are deprecated as too dangerous. Use 'co_return co_await ...' until explicit syntax is available.")]]
@@ -108,13 +108,13 @@ public:
 #else
         // this non-templated version only exists to support co_returning a braced-init-list
         void return_value(T&& value) noexcept {
-            _promise.set_value(std::forward<T>(value));
+            _promise.set_value_urgent(std::forward<T>(value));
         }
 
         template<typename U>
         requires std::is_convertible_v<U&&, T>
         void return_value(U&& value) noexcept {
-            _promise.set_value(std::forward<U>(value));
+            _promise.set_value_urgent(std::forward<U>(value));
         }
 #endif
 
@@ -161,7 +161,7 @@ public:
         promise_type(const promise_type&) = delete;
 
         void return_void() noexcept {
-            _promise.set_value();
+            _promise.set_value_urgent();
         }
 
         void set_exception(std::exception_ptr&& eptr) noexcept {
