@@ -354,6 +354,7 @@ struct float_stats {
 struct result {
     result(size_t run_count) :
         runtime{run_count},
+        walltime{run_count},
         allocs{run_count},
         tasks{run_count},
         inst{run_count},
@@ -367,6 +368,10 @@ struct result {
     unsigned runs = 0;
 
     float_stats<duration> runtime;
+    // Wall-clock length of a run, which for a test using start/stop_measuring_time
+    // is longer than runtime. Not reported as a column; it is what --duration
+    // limits, so it is what a declared iteration rate has to predict.
+    float_stats<duration> walltime;
 
     float_stats<> allocs;
     float_stats<> tasks;
@@ -851,7 +856,9 @@ void performance_test::do_run(const config& conf)
         // switch out of seastar thread
         yield().then([&] {
             _single_run_iterations = 0;
-            return do_single_run().then([&] (run_result rr) {
+            auto wall_start = clock_type::now();
+            return do_single_run().then([&, wall_start] (run_result rr) {
+                clock_type::duration wall = clock_type::now() - wall_start;
                 clock_type::duration dt = rr.duration;
                 double ns = std::chrono::duration_cast<std::chrono::nanoseconds>(dt).count();
 
@@ -860,6 +867,7 @@ void performance_test::do_run(const config& conf)
                 };
 
                 add(r.runtime, ns);
+                add(r.walltime, std::chrono::duration_cast<std::chrono::nanoseconds>(wall).count());
 
                 total_iterations += _single_run_iterations;
 
@@ -889,15 +897,15 @@ void performance_test::do_run(const config& conf)
     // enough that runs are nowhere near the requested duration.
     if (from_declared_rate) {
         constexpr double ns_per_second = 1e9;
-        // runtime is measured per iteration, in nanoseconds
-        double median_runtime = r.runtime.stats().med;
-        double measured_rate = median_runtime > 0 ? ns_per_second / median_runtime : 0;
+        // per iteration, in nanoseconds
+        double median_wall = r.walltime.stats().med;
+        double measured_rate = median_wall > 0 ? ns_per_second / median_wall : 0;
         double drift = measured_rate / _options.iters_per_sec;
         if (drift > DECLARED_RATE_DRIFT_FACTOR || drift < 1. / DECLARED_RATE_DRIFT_FACTOR) {
             fmt::print("WARNING: test '{}' declares {} iterations/s but achieved {:.3g}/s, "
                        "so each run took {} rather than the requested {}\n",
                        name(), _options.iters_per_sec, measured_rate,
-                       duration { fixed_iterations * median_runtime },
+                       duration { fixed_iterations * median_wall },
                        duration { double(conf.single_run_duration.count()) });
         }
     }
