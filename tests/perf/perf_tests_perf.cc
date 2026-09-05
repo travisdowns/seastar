@@ -116,6 +116,12 @@ PERF_TEST_CN(fixture, test_coro_n) {
 
 PERF_TEST(perf_tests, test_empty) { }
 
+// Declares its iteration rate, so the framework fixes the iteration count of
+// every run at that rate times the requested duration.
+PERF_TEST(fixed_iters, declared_rate, .iters_per_sec = 2.8e7) {
+    loop(100);
+}
+
 PERF_TEST(perf_tests, test_timer_overhead) {
     constexpr auto TIMER_LOOPS = 1000;
     for (size_t i = 0; i < TIMER_LOOPS; i++) {

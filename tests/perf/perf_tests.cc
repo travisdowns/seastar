@@ -305,6 +305,8 @@ struct config {
     unsigned random_seed = 0;
     double overhead_threshold = 0.1;  // warn if overhead exceeds this ratio (e.g., 0.1 = 10%)
     bool fail_on_high_overhead = false;  // fail the test run if overhead exceeds threshold
+    // a test declares a rate that this build does not honor
+    bool ignored_declared_rates = false;
 };
 
 // absorbs a single metric across all runs and calculates summary statistics
@@ -705,7 +707,7 @@ struct stdout_printer : text_printer {
         : text_printer(columns, options) {}
 
     virtual void print_configuration(const config& c) override {
-        fmt::print("{:<25} {}\n{:<25} {}\n{:<25} {}\n{:<25} {}\n{:<25} {}\n{:<25} {} ({})\n\n",
+        fmt::print("{:<25} {}\n{:<25} {}\n{:<25} {}\n{:<25} {}\n{:<25} {}\n{:<25} {} ({})\n",
                 "single run iterations:", c.single_run_iterations,
                 "single run duration:", duration { double(c.single_run_duration.count()) },
                 "number of runs:", c.number_of_runs,
@@ -713,6 +715,11 @@ struct stdout_printer : text_printer {
                 "random seed:", c.random_seed,
                 "start/stop overhead:", duration { measure_time->start_stop_overhead() },
                 duration { measure_time->start_stop_overhead_external() });
+
+        if (c.ignored_declared_rates) {
+            fmt::print("{:<25} {}\n", "declared rates:", "ignored (not a release build)");
+        }
+        fmt::print("\n");
 
         print_header_row();
     }
@@ -793,9 +800,17 @@ static std::FILE* maybe_open(const sstring& filename) {
 
 void performance_test::do_run(const config& conf)
 {
-    // Non-zero when the iteration count of a run is known up front, rather than
-    // being calibrated by the timed dry run below.
-    const uint64_t fixed_iterations = conf.single_run_iterations;
+    // Non-zero when the iteration count of a run is known up front, either
+    // because specified with --iterations or because the test declared
+    // iters_per_sec and this build honors that, so it can be calculated
+    // directly.
+    uint64_t fixed_iterations = conf.single_run_iterations;
+    if (SEASTAR_PERF_TESTS_HONOR_DECLARED_RATE && !fixed_iterations
+        && std::isfinite(_options.iters_per_sec)
+        && _options.iters_per_sec > 0 && conf.single_run_duration.count()) {
+        auto seconds = std::chrono::duration<double>(conf.single_run_duration).count();
+        fixed_iterations = std::max<uint64_t>(1, std::llround(_options.iters_per_sec * seconds));
+    }
 
     _max_single_run_iterations = fixed_iterations ? fixed_iterations
                                                  : std::numeric_limits<uint64_t>::max();
@@ -914,12 +929,16 @@ void run_all(const std::vector<std::string>& test_patterns, config& conf) {
     };
     size_t max_name_column_length = 0;
     size_t matched_count = 0;
+    bool any_declared_rate = false;
     for (auto& t : all_tests()) {
         if (match(t.get())) {
             max_name_column_length = std::max(max_name_column_length, t->name().size());
             ++matched_count;
+            any_declared_rate |= t->options().iters_per_sec > 0;
         }
     }
+    conf.ignored_declared_rates
+        = any_declared_rate && !SEASTAR_PERF_TESTS_HONOR_DECLARED_RATE;
     if (!regexes.empty() && matched_count == 0) {
         fmt::print(stderr, "WARNING: no tests matched the given pattern(s):");
         for (auto& pat : test_patterns) {
