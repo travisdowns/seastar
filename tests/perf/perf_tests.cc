@@ -798,6 +798,10 @@ static std::FILE* maybe_open(const sstring& filename) {
     return ret;
 }
 
+// How far the rate a test declares may be out before its runs are reported as
+// straying from the requested duration, as a factor either way.
+static constexpr double DECLARED_RATE_DRIFT_FACTOR = 2.;
+
 void performance_test::do_run(const config& conf)
 {
     // Non-zero when the iteration count of a run is known up front, either
@@ -805,11 +809,13 @@ void performance_test::do_run(const config& conf)
     // iters_per_sec and this build honors that, so it can be calculated
     // directly.
     uint64_t fixed_iterations = conf.single_run_iterations;
+    bool from_declared_rate = false;
     if (SEASTAR_PERF_TESTS_HONOR_DECLARED_RATE && !fixed_iterations
         && std::isfinite(_options.iters_per_sec)
         && _options.iters_per_sec > 0 && conf.single_run_duration.count()) {
         auto seconds = std::chrono::duration<double>(conf.single_run_duration).count();
         fixed_iterations = std::max<uint64_t>(1, std::llround(_options.iters_per_sec * seconds));
+        from_declared_rate = true;
     }
 
     _max_single_run_iterations = fixed_iterations ? fixed_iterations
@@ -876,6 +882,24 @@ void performance_test::do_run(const config& conf)
 
     for (auto& rp : conf.printers) {
         rp->print_result(r);
+    }
+
+    // A declared rate is measured on one machine and decays as the test changes,
+    // so it only ever approximates the duration of a run. Warn once it is stale
+    // enough that runs are nowhere near the requested duration.
+    if (from_declared_rate) {
+        constexpr double ns_per_second = 1e9;
+        // runtime is measured per iteration, in nanoseconds
+        double median_runtime = r.runtime.stats().med;
+        double measured_rate = median_runtime > 0 ? ns_per_second / median_runtime : 0;
+        double drift = measured_rate / _options.iters_per_sec;
+        if (drift > DECLARED_RATE_DRIFT_FACTOR || drift < 1. / DECLARED_RATE_DRIFT_FACTOR) {
+            fmt::print("WARNING: test '{}' declares {} iterations/s but achieved {:.3g}/s, "
+                       "so each run took {} rather than the requested {}\n",
+                       name(), _options.iters_per_sec, measured_rate,
+                       duration { fixed_iterations * median_runtime },
+                       duration { double(conf.single_run_duration.count()) });
+        }
     }
 
     // Check if overhead exceeds threshold and warn/fail

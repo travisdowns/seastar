@@ -167,4 +167,8 @@ With the default `--duration 1` that test runs exactly 10,000,000 iterations per
 
 An explicit `--iterations` overrides the declaration, and `--duration 0` (no duration limit) disables it, since there is then no duration to scale by.
 
-A declared rate is a measurement of one machine, so it only approximates the duration on another. It does not affect the reported results, which are always per-iteration, so a rate that is out of date costs nothing but a run that is shorter or longer than asked for.
+A declared rate is a measurement of one machine, so it only approximates the duration on another. It does not affect the reported results, which are always per-iteration, so a rate that is out of date costs nothing but a run that is shorter or longer than asked for. Once a run strays more than a factor of two from the requested duration, the achieved rate is reported so the declaration can be refreshed:
+
+```
+WARNING: test 'example.declared_rate' declares 100000 iterations/s but achieved 2.87e+07/s, so each run took 3.484ms rather than the requested 1.000s
+```
