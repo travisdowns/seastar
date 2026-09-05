@@ -270,6 +270,9 @@ void time_measurement_stop_iteration() {
 
 std::map<std::string, std::string> parameters;
 
+// Iteration rates measured for --suggest-rates, in the order the tests ran.
+std::vector<std::pair<std::string, double>> suggested_rates;
+
 std::string get_parameter(std::string name) {
     auto it = parameters.find(name);
     return it == parameters.end() ? "" : it->second;
@@ -305,6 +308,7 @@ struct config {
     unsigned random_seed = 0;
     double overhead_threshold = 0.1;  // warn if overhead exceeds this ratio (e.g., 0.1 = 10%)
     bool fail_on_high_overhead = false;  // fail the test run if overhead exceeds threshold
+    bool suggest_rates = false;  // report each test's measured iteration rate
     // a test declares a rate that this build does not honor
     bool ignored_declared_rates = false;
 };
@@ -892,14 +896,20 @@ void performance_test::do_run(const config& conf)
         rp->print_result(r);
     }
 
+    // The rate at which the test iterates, on the wall clock because that is what
+    // --duration limits and so what a declared rate has to predict.
+    constexpr double ns_per_second = 1e9;
+    const double median_wall = r.walltime.stats().med;  // per iteration, in nanoseconds
+    const double measured_rate = median_wall > 0 ? ns_per_second / median_wall : 0;
+
+    if (conf.suggest_rates) {
+        suggested_rates.emplace_back(name(), measured_rate);
+    }
+
     // A declared rate is measured on one machine and decays as the test changes,
     // so it only ever approximates the duration of a run. Warn once it is stale
     // enough that runs are nowhere near the requested duration.
     if (from_declared_rate) {
-        constexpr double ns_per_second = 1e9;
-        // per iteration, in nanoseconds
-        double median_wall = r.walltime.stats().med;
-        double measured_rate = median_wall > 0 ? ns_per_second / median_wall : 0;
         double drift = measured_rate / _options.iters_per_sec;
         if (drift > DECLARED_RATE_DRIFT_FACTOR || drift < 1. / DECLARED_RATE_DRIFT_FACTOR) {
             fmt::print("WARNING: test '{}' declares {} iterations/s but achieved {:.3g}/s, "
@@ -944,6 +954,42 @@ std::vector<std::unique_ptr<performance_test>>& all_tests()
 void performance_test::register_test(std::unique_ptr<performance_test> test)
 {
     all_tests().emplace_back(std::move(test));
+}
+
+// Format a rate as a C++ integer literal with digit separators, rounded to two
+// significant digits. A declared rate only has to predict the length of a run, so
+// carrying more digits than that into the source would be false precision.
+static std::string format_rate_literal(double rate) {
+    uint64_t value = 1;
+    if (rate > 1) {
+        double scale = std::pow(10., std::max(0., std::floor(std::log10(rate)) - 1));
+        value = static_cast<uint64_t>(std::llround(rate / scale) * scale);
+    }
+    auto digits = fmt::format("{}", value);
+    std::string literal;
+    for (size_t i = 0; i < digits.size(); i++) {
+        if (i && (digits.size() - i) % 3 == 0) {
+            literal += '\'';
+        }
+        literal += digits[i];
+    }
+    return literal;
+}
+
+static void print_suggested_rates() {
+    if (suggested_rates.empty()) {
+        return;
+    }
+    size_t width = 0;
+    for (auto& [name, rate] : suggested_rates) {
+        width = std::max(width, name.size());
+    }
+    fmt::print("\nmeasured iteration rates, to declare in the PERF_TEST macro so that a\n"
+               "run's iteration count no longer depends on the speed of the machine:\n\n");
+    for (auto& [name, rate] : suggested_rates) {
+        fmt::print("  {:<{}}  .iters_per_sec = {}\n", name, width, format_rate_literal(rate));
+    }
+    fmt::print("\n");
 }
 
 void run_all(const std::vector<std::string>& test_patterns, config& conf) {
@@ -998,6 +1044,9 @@ void run_all(const std::vector<std::string>& test_patterns, config& conf) {
     for (auto& rp : conf.printers) {
         rp->print_summary(total_duration);
     }
+    if (conf.suggest_rates) {
+        print_suggested_rates();
+    }
 }
 
 }
@@ -1030,6 +1079,7 @@ int main(int ac, char** av)
         ("overhead-threshold", bpo::value<double>()->default_value(0.1),
             "warn if overhead exceeds this ratio (default: 0.1 = 10%)")
         ("fail-on-high-overhead", "fail the test run if any test exceeds the overhead threshold")
+        ("suggest-rates", "report the iteration rate measured for each test, as the .iters_per_sec declaration to paste into its PERF_TEST macro")
         ("no-perf-counters", "disable hardware perf counters (inst/cycles)")
         ("parameter", bpo::value<std::vector<std::string>>(), "specify test-specific parameters")
         ;
@@ -1049,6 +1099,7 @@ int main(int ac, char** av)
             conf.random_seed = app.configuration()["random-seed"].as<unsigned>();
             conf.overhead_threshold = app.configuration()["overhead-threshold"].as<double>();
             conf.fail_on_high_overhead = app.configuration().count("fail-on-high-overhead") > 0;
+            conf.suggest_rates = app.configuration().count("suggest-rates") > 0;
 
             std::vector<std::string> tests_to_run;
             if (app.configuration().count("test")) {

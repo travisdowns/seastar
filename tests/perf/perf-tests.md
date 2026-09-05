@@ -29,6 +29,7 @@ many iterations can be run in the specified time.
 * `-r <n>` or `--runs <n>` – the number of runs of each test to execute
 * `-t <regexs>` or `--tests <regexs>` – executes only tests which names match any regular expression in a comma-separated list `regexs`
 * `--list` – lists all available tests
+* `--suggest-rates` – after the results, print the iteration rate measured for each test as a `.iters_per_sec` declaration to paste into its `PERF_TEST` macro
 * `--overhead-threshold <percent>` – warn if measurement overhead exceeds this percentage (default: 10)
 * `--fail-on-high-overhead` – fail the test run if any test exceeds the overhead threshold
 
@@ -166,6 +167,19 @@ declared rates:           ignored (not a release build)
 With the default `--duration 1` that test runs exactly 10,000,000 iterations per run; with `--duration 5`, exactly 50,000,000. The rate is expressed in the same iterations that `--iterations` limits and the `iters` column reports, so a test which returns an iteration count from its body declares its rate in those inner iterations.
 
 An explicit `--iterations` overrides the declaration, and `--duration 0` (no duration limit) disables it, since there is then no duration to scale by.
+
+The rate is a measurement, so the framework will take it for you: `--suggest-rates` prints one pasteable declaration per test, measured on the wall clock (what `--duration` actually limits) and rounded to two significant digits.
+
+```
+measured iteration rates, to declare in the PERF_TEST macro so that a
+run's iteration count no longer depends on the speed of the machine:
+
+  example.simple1              .iters_per_sec = 2'700'000'000
+  example.declared_rate        .iters_per_sec = 52'000'000
+  example.big_inner_loop       .iters_per_sec = 540
+```
+
+It works whether or not the test already declares a rate, so the same command both writes the declarations and refreshes them.
 
 A declared rate is a measurement of one machine, so it only approximates the duration on another. It does not affect the reported results, which are always per-iteration, so a rate that is out of date costs nothing but a run that is shorter or longer than asked for. Once a run strays more than a factor of two from the requested duration, the achieved rate is reported so the declaration can be refreshed:
 
