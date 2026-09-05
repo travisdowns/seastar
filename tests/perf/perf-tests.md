@@ -20,8 +20,8 @@ combined.single_active                7871    85.271us    76.185ns    85.145us  
 
 ### Flags
 
-* `-i <n>` or `--iterations <n>` – limits the number of iterations in each run to no more than `n` (0 for unlimited)
-* `-d <t>` or `--duration <t>` – limits the duration of each run to no more than `t` seconds (0 for unlimited)
+* `-i <n>` or `--iterations <n>` – fixes the number of iterations in each run at `n`, however long that takes (0 to let `--duration` decide)
+* `-d <t>` or `--duration <t>` – limits the duration of each run to no more than `t` seconds, unless `--iterations` has already fixed the count (0 for unlimited)
 * `-r <n>` or `--runs <n>` – the number of runs of each test to execute
 * `-t <regexs>` or `--tests <regexs>` – executes only tests which names match any regular expression in a comma-separated list `regexs`
 * `--list` – lists all available tests

@@ -793,23 +793,32 @@ static std::FILE* maybe_open(const sstring& filename) {
 
 void performance_test::do_run(const config& conf)
 {
-    _max_single_run_iterations = conf.single_run_iterations;
-    if (!_max_single_run_iterations) {
-        _max_single_run_iterations = std::numeric_limits<uint64_t>::max();
-    }
+    // Non-zero when the iteration count of a run is known up front, rather than
+    // being calibrated by the timed dry run below.
+    const uint64_t fixed_iterations = conf.single_run_iterations;
+
+    _max_single_run_iterations = fixed_iterations ? fixed_iterations
+                                                 : std::numeric_limits<uint64_t>::max();
 
     signal_timer tmr([this] {
         _max_single_run_iterations.store(0, std::memory_order_relaxed);
     });
 
-    // dry run, estimate the number of iterations
+    // One run ahead of the measured ones: a dry run whose iteration count
+    // calibrates the measured runs, or, when the count is already fixed, a
+    // warm-up of the same length as those runs, keeping first-run effects (cold
+    // caches, the allocator growing its pools) out of the measured ones.
     if (conf.single_run_duration.count()) {
         // switch out of seastar thread
         yield().then([&] {
-            tmr.arm(conf.single_run_duration);
+            if (!fixed_iterations) {
+                tmr.arm(conf.single_run_duration);
+            }
             return do_single_run().finally([&] {
-                tmr.cancel();
-                _max_single_run_iterations = _single_run_iterations;
+                if (!fixed_iterations) {
+                    tmr.cancel();
+                    _max_single_run_iterations = _single_run_iterations;
+                }
             });
         }).get();
     }
