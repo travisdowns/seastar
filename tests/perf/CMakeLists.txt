@@ -117,3 +117,7 @@ if (Seastar_LTTNG)
     PROPERTIES OUTPUT_NAME lttng_overhead_perf)
   add_dependencies (perf_tests test_perf_lttng_overhead)
 endif ()
+
+seastar_add_test (metrics_mem
+  SOURCES metrics_mem.cc
+  NO_SEASTAR_PERF_TESTING_LIBRARY)

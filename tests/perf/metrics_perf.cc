@@ -207,6 +207,51 @@ struct metrics_perf_fixture {
         // if histogram metrics are used there are N buckets per metric, plus 2 for count and sum
         co_return series_count * iterations * (type == data_type::HISTOGRAM ? histo_buckets + 2 : 1);
     }
+
+    // Redpanda-shaped per-partition series: families_count families, each with one series
+    // per partition replica labeled {namespace, topic, partition}, optionally aggregated by
+    // {shard, partition} so each family collapses to one output series per topic.
+    seastar::future<size_t> run_partition_bench(size_t partitions, size_t topics, size_t families_count, bool enable_aggregation) {
+        using namespace seastar::metrics;
+
+        remove_existing_metrics();
+
+        metric_groups perf_metrics;
+        label ns("namespace"), topic("topic"), partition("partition");
+        std::vector<metric_definition> defs;
+        for (auto f : irange(families_count)) {
+            auto name = fmt::format("family_{}", f);
+            for (auto p : irange(partitions)) {
+                auto impl = make_counter(name, [] { return size_t(123); }, description("d"),
+                        {ns("kafka"), topic(fmt::format("{:t>20}", p % topics)), partition(p / topics)});
+                if (enable_aggregation) {
+                    impl.aggregate({shard_label, partition});
+                }
+                defs.emplace_back(std::move(impl));
+            }
+        }
+        perf_metrics.add_group("rp", defs);
+
+        prometheus::config config{};
+        using access = prometheus::details::test_access;
+        constexpr int iterations = 20;
+
+        perf_tests::start_measuring_time();
+        for ([[maybe_unused]] auto _: irange(iterations)) {
+            output_stream<char> out{counting_data_sink{}};
+            co_await access{}.write_body(config,
+                write_body_args{
+                    .filter = always_true,
+                    .family_filter = [](std::string_view) { return true; },
+                    .use_protobuf_format = false,
+                    .show_help = true,
+                    .enable_aggregation = enable_aggregation
+                },
+                std::move(out));
+        }
+        perf_tests::stop_measuring_time();
+        co_return partitions * families_count * iterations;
+    }
 };
 
 PERF_TEST_CN(metrics_perf_fixture, test_few_metrics) {
@@ -290,6 +335,20 @@ PERF_TEST_CN(metrics_perf_fixture, test_name_filter_many_no_match) {
     }
     auto filter = make_family_filter(std::move(filters));
     co_return co_await run_metrics_bench(1, 1000, 10, data_type::COUNTER, false, false, filter);
+}
+
+PERF_TEST_CN(metrics_perf_fixture, test_partitions_aggr) {
+    // 67 families x 1000 partitions over 10 topics, aggregated to 670 output series
+    co_return co_await run_partition_bench(1000, 10, 67, true);
+}
+
+PERF_TEST_CN(metrics_perf_fixture, test_partitions_aggr_topic_per_partition) {
+    // as above but every partition is its own topic, so nothing collapses
+    co_return co_await run_partition_bench(1000, 1000, 67, true);
+}
+
+PERF_TEST_CN(metrics_perf_fixture, test_partitions_noaggr) {
+    co_return co_await run_partition_bench(1000, 10, 67, false);
 }
 
 }
