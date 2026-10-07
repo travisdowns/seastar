@@ -797,6 +797,30 @@ BOOST_AUTO_TEST_CASE(test_aggregation_cache_stale_config_not_trusted) {
     BOOST_REQUIRE(out_labels.find("shard") != out_labels.end());
 }
 
+// Series whose labels reduce to the same key under the same aggregate_labels config share
+// one interned aggregation_key; a different config yields a distinct instance even when
+// the key string is identical.
+BOOST_AUTO_TEST_CASE(test_aggregation_key_interned) {
+    mi::labels_type a{{"extra", mi::labels_type::mapped_type("a")}, {"shard", mi::labels_type::mapped_type("0")}};
+    mi::labels_type b{{"extra", mi::labels_type::mapped_type("a")}, {"shard", mi::labels_type::mapped_type("1")}};
+    mi::labels_type c{{"extra", mi::labels_type::mapped_type("c")}, {"shard", mi::labels_type::mapped_type("0")}};
+
+    mi::aggregation_key_interner interner;
+    auto ka = interner.intern(a, {"shard"});
+    auto kb = interner.intern(b, {"shard"});
+    auto kc = interner.intern(c, {"shard"});
+    BOOST_REQUIRE(ka);
+    BOOST_REQUIRE_EQUAL(ka.get(), kb.get());
+    BOOST_REQUIRE_NE(ka.get(), kc.get());
+    BOOST_REQUIRE_EQUAL(ka->key, "extra\na\n");
+
+    auto other_config = interner.intern(a, {"shard", "other"});
+    BOOST_REQUIRE_EQUAL(other_config->key, ka->key);
+    BOOST_REQUIRE_NE(other_config.get(), ka.get());
+
+    BOOST_REQUIRE(!interner.intern(a, {}));
+}
+
 // Tests for family_filter functionality
 // These tests use make_family_filter to exercise the same filtering logic used by the HTTP handler
 
