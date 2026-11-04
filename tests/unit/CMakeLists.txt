@@ -317,9 +317,11 @@ seastar_add_app_test (alien
   SOURCES alien_test.cc)
 
 seastar_add_test (checked_ptr
+  KIND BOOST
   SOURCES checked_ptr_test.cc)
 
 seastar_add_test (temporary_buffer
+  KIND BOOST
   SOURCES temporary_buffer_test.cc)
 
 seastar_add_test (chunked_fifo
@@ -928,6 +930,7 @@ seastar_add_test (spawn
   SOURCES spawn_test.cc)
 
 seastar_add_test (variant_utils
+  KIND BOOST
   SOURCES variant_utils_test.cc)
 
 seastar_generate_swagger (
