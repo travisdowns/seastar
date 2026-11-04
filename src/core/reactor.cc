@@ -931,6 +931,12 @@ static void print_with_backtrace(const char* cause, bool oneline = true, bool im
 // When it goes out of scope the previous handler is restored.
 static decltype(auto) install_signal_handler_stack() {
     size_t size = SIGSTKSZ;
+#ifdef _SC_SIGSTKSZ
+    // musl defines SIGSTKSZ as a constant 8192, but the kernel requires more
+    // on CPUs with a large XSAVE area (AMX) and rejects a smaller stack with
+    // ENOMEM. sysconf() reports the size the running kernel needs.
+    size = std::max<size_t>(size, sysconf(_SC_SIGSTKSZ));
+#endif
     auto mem = std::make_unique<char[]>(size);
     stack_t stack;
     stack_t prev_stack;

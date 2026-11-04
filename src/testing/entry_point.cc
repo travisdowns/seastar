@@ -20,6 +20,9 @@
  * Copyright (C) 2018 ScyllaDB Ltd.
  */
 
+#include <csignal>
+#include <cstdlib>
+#include <unistd.h>
 #include <boost/test/unit_test.hpp>
 #include <seastar/testing/entry_point.hh>
 #include <seastar/testing/seastar_test.hh>
@@ -45,7 +48,28 @@ static void install_dummy_handler(int sig) {
     sigaction(sig, &sa, nullptr);
 }
 
+// Boost.Test sizes its alternate signal stack as SIGSTKSZ. Where that is a
+// compile-time constant smaller than the running kernel's minimum (musl on
+// CPUs with AMX state), Boost's sigaltstack() call fails with ENOMEM and every
+// test aborts at setup. In that case install a correctly sized stack before
+// Boost starts, which makes Boost keep it for its init phase, and turn off
+// Boost's per-test-case alternate stack, which would fail the same way.
+static void work_around_boost_alt_stack_size() {
+#ifdef _SC_SIGSTKSZ
+    long needed = sysconf(_SC_SIGSTKSZ);
+    if (needed <= 0 || static_cast<size_t>(needed) <= static_cast<size_t>(SIGSTKSZ)) {
+        return;
+    }
+    stack_t st {};
+    st.ss_sp = new char[needed]; // lives for the rest of the process
+    st.ss_size = needed;
+    sigaltstack(&st, nullptr);
+    setenv("BOOST_TEST_USE_ALT_STACK", "no", 0);
+#endif
+}
+
 int entry_point(int argc, char** argv) {
+    work_around_boost_alt_stack_size();
 #ifndef SEASTAR_ASAN_ENABLED
     // Before we call into boost, install some dummy signal
     // handlers. This seems to be the only way to stop boost from

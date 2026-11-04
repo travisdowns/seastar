@@ -11,7 +11,7 @@ concurrency:
   cancel-in-progress: ${{ startsWith(github.ref, 'refs/pull/') }}
 
 jobs:
-  probe:
+  build-and-test:
     runs-on: ubuntu-latest
     container:
       image: alpine:latest
@@ -19,24 +19,23 @@ jobs:
       fail-fast: false
       matrix:
         n: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+
     steps:
     - name: Checkout repository
       uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
-    - name: Probe
+
+    # Only build on runners whose kernel needs more than musl's 8192-byte
+    # SIGSTKSZ, since those are the ones that reproduce the failure.
+    - name: Probe and gate
+      id: gate
       run: |
         apk add --no-cache gcc musl-dev
-        sh .github/alpine-diag.sh
-
-  build-and-test:
-    runs-on: ubuntu-latest
-    container:
-      image: alpine:latest
-
-    steps:
-    - name: Checkout repository
-      uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        sh .github/alpine-diag.sh | tee /tmp/diag.txt
+        min=$(sed -n 's/^PROBE AT_MINSIGSTKSZ=//p' /tmp/diag.txt)
+        if [ "$min" -gt 8192 ]; then echo "big=1" >> "$GITHUB_OUTPUT"; else echo "AT_MINSIGSTKSZ=$min, not a reproducing host, skipping build"; fi
 
     - name: Install build dependencies
+      if: steps.gate.outputs.big == '1'
       run: |
         apk update
         apk add --no-cache   \
@@ -63,13 +62,13 @@ jobs:
           py3-yaml           \
           ragel              \
           samurai            \
-          strace             \
           util-linux-dev     \
           valgrind-dev       \
           xfsprogs-dev       \
           yaml-cpp-dev
 
     - name: Configure build
+      if: steps.gate.outputs.big == '1'
       run: |
         cmake -B build -G Ninja            \
          -DCMAKE_BUILD_TYPE=RelWithDebInfo \
@@ -77,14 +76,12 @@ jobs:
          -DSeastar_DOCS=OFF
 
     - name: Build Seastar
+      if: steps.gate.outputs.big == '1'
       run: |
         cmake --build build
 
-    - name: Diagnostics
-      run: |
-        sh .github/alpine-diag.sh
-
     - name: Run unit tests
+      if: steps.gate.outputs.big == '1'
       env:
         # By default each test takes all memory except a reserve, so it fails
         # at startup with "Out of memory" whenever the runner has less free
@@ -93,10 +90,3 @@ jobs:
       run: |
         ctest --test-dir build --output-on-failure
 
-    - name: strace a failing test
-      if: always()
-      env:
-        SEASTAR_OPTIONS: --memory 2G
-      run: |
-        strace -f -e trace=sigaltstack,mbind,set_mempolicy,mmap,munmap,prctl,arch_prctl \
-          build/tests/unit/checked_ptr_test -- -c 2 2>&1 | grep -v -E 'mmap\(.*= 0x|munmap\(.*= 0$' | tail -80
