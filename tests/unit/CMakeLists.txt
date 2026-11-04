@@ -165,6 +165,11 @@ function (seastar_add_test name)
 
     add_executable (${executable_target} ${parsed_args_SOURCES})
 
+    if (parsed_args_KIND STREQUAL "BOOST")
+      target_sources (${executable_target}
+        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/boost_alt_stack.cc)
+    endif ()
+
     target_link_libraries (${executable_target}
       PRIVATE ${libraries})
 
