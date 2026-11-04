@@ -1,6 +1,8 @@
 name: Alpine Linux
 
 on:
+  push:
+    branches: [td-alpine-oom-debug]
   pull_request:
   workflow_dispatch:  # Allows manual triggering
 
@@ -9,6 +11,22 @@ concurrency:
   cancel-in-progress: ${{ startsWith(github.ref, 'refs/pull/') }}
 
 jobs:
+  probe:
+    runs-on: ubuntu-latest
+    container:
+      image: alpine:latest
+    strategy:
+      fail-fast: false
+      matrix:
+        n: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+    - name: Probe
+      run: |
+        apk add --no-cache gcc musl-dev
+        sh .github/alpine-diag.sh
+
   build-and-test:
     runs-on: ubuntu-latest
     container:
@@ -45,6 +63,7 @@ jobs:
           py3-yaml           \
           ragel              \
           samurai            \
+          strace             \
           util-linux-dev     \
           valgrind-dev       \
           xfsprogs-dev       \
@@ -61,6 +80,10 @@ jobs:
       run: |
         cmake --build build
 
+    - name: Diagnostics
+      run: |
+        sh .github/alpine-diag.sh
+
     - name: Run unit tests
       env:
         # By default each test takes all memory except a reserve, so it fails
@@ -69,3 +92,11 @@ jobs:
         SEASTAR_OPTIONS: --memory 2G
       run: |
         ctest --test-dir build --output-on-failure
+
+    - name: strace a failing test
+      if: always()
+      env:
+        SEASTAR_OPTIONS: --memory 2G
+      run: |
+        strace -f -e trace=sigaltstack,mbind,set_mempolicy,mmap,munmap,prctl,arch_prctl \
+          build/tests/unit/checked_ptr_test -- -c 2 2>&1 | grep -v -E 'mmap\(.*= 0x|munmap\(.*= 0$' | tail -80
