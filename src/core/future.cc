@@ -90,22 +90,6 @@ namespace internal {
 
 static_assert(std::is_empty_v<uninitialized_wrapper<std::tuple<>>>, "This should still be empty");
 
-void promise_base::move_it(promise_base&& x) noexcept {
-    // Don't use std::exchange to make sure x's values are nulled even
-    // if &x == this.
-    _task = x._task;
-    x._task = nullptr;
-#ifdef SEASTAR_DEBUG_PROMISE
-    _task_shard = x._task_shard;
-#endif
-    _state = x._state;
-    x._state = nullptr;
-    _future = x._future;
-    if (auto* fut = _future) {
-        fut->detach_promise();
-        fut->_promise = this;
-    }
-}
 
 static void set_to_broken_promise(future_state_base& state) noexcept {
     try {
@@ -116,9 +100,6 @@ static void set_to_broken_promise(future_state_base& state) noexcept {
     }
 }
 
-promise_base::promise_base(promise_base&& x) noexcept {
-    move_it(std::move(x));
-}
 
 void promise_base::clear_on_broken() noexcept {
     SEASTAR_ASSERT(_state && !_state->available());

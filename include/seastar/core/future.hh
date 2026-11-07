@@ -892,8 +892,8 @@ protected:
     promise_base(const promise_base&) = delete;
     promise_base(future_state_base* state) noexcept : _state(state) {}
     promise_base(future_base* future, future_state_base* state) noexcept;
-    void move_it(promise_base&& x) noexcept;
-    promise_base(promise_base&& x) noexcept;
+    inline void move_it(promise_base&& x) noexcept;
+    inline promise_base(promise_base&& x) noexcept;
 
     inline void clear() noexcept;
 
@@ -1372,6 +1372,27 @@ protected:
 
     friend class promise_base;
 };
+
+inline void promise_base::move_it(promise_base&& x) noexcept {
+    // Don't use std::exchange to make sure x's values are nulled even
+    // if &x == this.
+    _task = x._task;
+    x._task = nullptr;
+#ifdef SEASTAR_DEBUG_PROMISE
+    _task_shard = x._task_shard;
+#endif
+    _state = x._state;
+    x._state = nullptr;
+    _future = x._future;
+    if (auto* fut = _future) {
+        fut->detach_promise();
+        fut->_promise = this;
+    }
+}
+
+inline promise_base::promise_base(promise_base&& x) noexcept {
+    move_it(std::move(x));
+}
 
 inline void promise_base::clear() noexcept {
     if (__builtin_expect(bool(_task) || (_future && !_state->available()), false)) {
