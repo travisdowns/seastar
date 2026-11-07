@@ -79,15 +79,18 @@ const task_type_info* find_task_type(task_run_fn run_fn) noexcept;
 /// promise of a coroutine). Either way the function the reactor calls is
 /// found 16 bytes in front of the task, so dispatch needs no virtual call.
 class task {
-    // The scheduling group's index in the low 16 bits and the coroutine flag
-    // above it, in one word so the constructor writes both with a single
-    // 4-byte store, and group() reads the index with a plain 2-byte load.
-    // Writing them with two stores into the same 8 bytes makes later work on
-    // the task slower, measurably on Graviton5 and Zen 4.
+    // The scheduling group's index in the low 16 bits and, above it, a bit
+    // set for a runnable_task and clear for a coroutine, in one word so the
+    // constructor writes both with a single 4-byte store, and group() reads
+    // the index with a plain 2-byte load. Writing them with two stores into
+    // the same 8 bytes makes later work on the task slower, measurably on
+    // Graviton5 and Zen 4. Coroutines get the clear bit because most of them
+    // complete without suspending, so their promise is built far more often
+    // than it is run: it stores the current group's index unchanged.
     uint32_t _sg_and_kind;
-    static constexpr uint32_t coroutine_bit = uint32_t(1) << 16;
+    static constexpr uint32_t runnable_bit = uint32_t(1) << 16;
     static_assert(max_scheduling_groups() <= 0x10000);
-    bool is_coroutine() const noexcept { return _sg_and_kind & coroutine_bit; }
+    bool is_coroutine() const noexcept { return !(_sg_and_kind & runnable_bit); }
 #ifdef SEASTAR_TASK_BACKTRACE
     shared_backtrace _bt;
 #endif
@@ -96,7 +99,7 @@ class task {
     friend class coroutine_task;
 
     task(scheduling_group sg, bool is_coroutine) noexcept
-        : _sg_and_kind(internal::scheduling_group_index(sg) | (is_coroutine ? coroutine_bit : 0)) {}
+        : _sg_and_kind(internal::scheduling_group_index(sg) | (is_coroutine ? 0 : runnable_bit)) {}
 
     std::source_location& resume_point() noexcept;
 
@@ -115,7 +118,7 @@ protected:
 
     scheduling_group set_scheduling_group(scheduling_group new_sg) noexcept {
         scheduling_group old = group();
-        _sg_and_kind = (_sg_and_kind & coroutine_bit) | internal::scheduling_group_index(new_sg);
+        _sg_and_kind = (_sg_and_kind & runnable_bit) | internal::scheduling_group_index(new_sg);
         return old;
     }
 
