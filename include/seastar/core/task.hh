@@ -26,6 +26,7 @@
 #include <seastar/util/backtrace.hh>
 
 #include <coroutine>
+#include <cstdint>
 #include <cstdlib>
 #include <type_traits>
 #include <typeinfo>
@@ -78,11 +79,15 @@ const task_type_info* find_task_type(task_run_fn run_fn) noexcept;
 /// promise of a coroutine). Either way the function the reactor calls is
 /// found 16 bytes in front of the task, so dispatch needs no virtual call.
 class task {
-protected:
-    scheduling_group _sg;
-
-private:
-    bool _is_coroutine;
+    // The scheduling group's index in the low 16 bits and the coroutine flag
+    // above it, in one word so the constructor writes both with a single
+    // 4-byte store, and group() reads the index with a plain 2-byte load.
+    // Writing them with two stores into the same 8 bytes makes later work on
+    // the task slower, measurably on Graviton5 and Zen 4.
+    uint32_t _sg_and_kind;
+    static constexpr uint32_t coroutine_bit = uint32_t(1) << 16;
+    static_assert(max_scheduling_groups() <= 0x10000);
+    bool is_coroutine() const noexcept { return _sg_and_kind & coroutine_bit; }
 #ifdef SEASTAR_TASK_BACKTRACE
     shared_backtrace _bt;
 #endif
@@ -90,7 +95,8 @@ private:
     friend class runnable_task;
     friend class coroutine_task;
 
-    task(scheduling_group sg, bool is_coroutine) noexcept : _sg(sg), _is_coroutine(is_coroutine) {}
+    task(scheduling_group sg, bool is_coroutine) noexcept
+        : _sg_and_kind(internal::scheduling_group_index(sg) | (is_coroutine ? coroutine_bit : 0)) {}
 
     std::source_location& resume_point() noexcept;
 
@@ -107,8 +113,10 @@ protected:
     // information via inheritance.
     ~task() = default;
 
-    scheduling_group set_scheduling_group(scheduling_group new_sg) noexcept{
-        return std::exchange(_sg, new_sg);
+    scheduling_group set_scheduling_group(scheduling_group new_sg) noexcept {
+        scheduling_group old = group();
+        _sg_and_kind = (_sg_and_kind & coroutine_bit) | internal::scheduling_group_index(new_sg);
+        return old;
     }
 
     template <typename T>
@@ -124,7 +132,7 @@ public:
     const task_type_info& task_info() const noexcept;
     void update_resume_point(std::source_location sl) noexcept { resume_point() = sl; }
     std::source_location get_resume_point() const noexcept { return const_cast<task*>(this)->resume_point(); }
-    scheduling_group group() const { return _sg; }
+    scheduling_group group() const { return internal::scheduling_group_from_index(uint16_t(_sg_and_kind)); }
 #ifdef SEASTAR_TASK_BACKTRACE
     void make_backtrace() noexcept;
     shared_backtrace get_backtrace() const { return _bt; }
@@ -203,7 +211,7 @@ inline void task::run_and_dispose() noexcept {
     // that address: a coroutine frame's resume function, or a runnable_task's
     // header. They are the same call, so clang drops the test and emits one
     // indirect call.
-    if (_is_coroutine) {
+    if (is_coroutine()) {
         std::coroutine_handle<>::from_address(reinterpret_cast<char*>(this) - 16).resume();
     } else {
         internal::task_header* h = static_cast<runnable_task*>(this);
@@ -212,14 +220,14 @@ inline void task::run_and_dispose() noexcept {
 }
 
 inline std::source_location& task::resume_point() noexcept {
-    if (_is_coroutine) {
+    if (is_coroutine()) {
         return static_cast<coroutine_task*>(this)->_resume_point;
     }
     return static_cast<internal::task_header*>(static_cast<runnable_task*>(this))->_resume_point;
 }
 
 inline const task_type_info& task::task_info() const noexcept {
-    if (_is_coroutine) {
+    if (is_coroutine()) {
         return *static_cast<const coroutine_task*>(this)->_info;
     }
     auto run_fn = static_cast<const internal::task_header*>(static_cast<const runnable_task*>(this))->_run_fn;

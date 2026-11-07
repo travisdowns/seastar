@@ -140,7 +140,7 @@ public:
         task* waiting_task() noexcept { return _promise.waiting_task(); }
 
         scheduling_group set_scheduling_group(scheduling_group sg) noexcept {
-            return std::exchange(this->_sg, sg);
+            return task::set_scheduling_group(sg);
         }
     };
 };
