@@ -2735,6 +2735,9 @@ thread_local uint64_t syscall_yields = 0;
 // Also yield while storage I/O is outstanding, so kernel workers doing completion work on
 // this CPU (iomap DIO completion, aio fsync) get to run.
 thread_local bool syscall_yield_on_io = false;
+// Only yield from the idle branch of the reactor loop (a poll found no work), instead of
+// on every loop iteration.
+thread_local bool syscall_yield_idle_only = false;
 
 // Yields the CPU to the syscall threads when they have work in flight and the interval since
 // the last yield has elapsed.
@@ -3603,6 +3606,9 @@ int reactor::do_run() {
     if (const char* y = std::getenv("SEASTAR_SYSCALL_YIELD_ON_IO")) {
         syscall_yield_on_io = std::atol(y) != 0;
     }
+    if (const char* y = std::getenv("SEASTAR_SYSCALL_YIELD_IDLE_ONLY")) {
+        syscall_yield_idle_only = std::atol(y) != 0;
+    }
     while (true) {
         _cpu_sched.run_some_tasks();
         if (_stopped) {
@@ -3610,7 +3616,9 @@ int reactor::do_run() {
         }
 
         _polls++;
-        maybe_yield_to_syscall_threads(*_thread_pool, *_backend);
+        if (!syscall_yield_idle_only) {
+            maybe_yield_to_syscall_threads(*_thread_pool, *_backend);
+        }
 
         lowres_clock::update(); // Don't delay expiring lowres timers
         if (check_for_work()) {
@@ -3621,6 +3629,9 @@ int reactor::do_run() {
             mark_idle(t);
             if (!idle_poll_start) {
                 idle_poll_start = t;
+            }
+            if (syscall_yield_idle_only) {
+                maybe_yield_to_syscall_threads(*_thread_pool, *_backend);
             }
             bool go_to_sleep = true;
             try {
