@@ -28,6 +28,7 @@
 #include <seastar/core/metrics_api.hh>
 #include <seastar/core/reactor.hh>
 #include <seastar/net/stack.hh>
+#include <cstdlib>
 #include <seastar/net/inet_address.hh>
 
 namespace seastar {
@@ -113,9 +114,19 @@ input_stream<char> connected_socket::input(connected_socket_input_stream_config 
     return input_stream<char>(_csi->source(csisc));
 }
 
+// Whether socket output streams batch their flushes into the reactor's flush poller.
+// SEASTAR_SOCKET_BATCH_FLUSHES=0 makes flush() write to the socket immediately instead.
+static bool socket_batch_flushes() {
+    static const bool batch = [] {
+        const char* e = std::getenv("SEASTAR_SOCKET_BATCH_FLUSHES");
+        return !(e && e[0] == '0');
+    }();
+    return batch;
+}
+
 output_stream<char> connected_socket::output(size_t buffer_size) {
     output_stream_options opts;
-    opts.batch_flushes = true;
+    opts.batch_flushes = socket_batch_flushes();
     // TODO: allow user to determine buffer size etc
     return output_stream<char>(_csi->sink(), buffer_size, opts);
 }
