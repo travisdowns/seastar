@@ -2732,14 +2732,19 @@ namespace {
 thread_local std::chrono::microseconds syscall_yield_interval{0};
 thread_local sched_clock::time_point last_syscall_yield{};
 thread_local uint64_t syscall_yields = 0;
+// Also yield while storage I/O is outstanding, so kernel workers doing completion work on
+// this CPU (iomap DIO completion, aio fsync) get to run.
+thread_local bool syscall_yield_on_io = false;
 
 // Yields the CPU to the syscall threads when they have work in flight and the interval since
 // the last yield has elapsed.
-void maybe_yield_to_syscall_threads(thread_pool& pool, thread_pool* aio_pool) noexcept {
+void maybe_yield_to_syscall_threads(thread_pool& pool, reactor_backend& backend) noexcept {
     if (syscall_yield_interval.count() == 0) {
         return;
     }
-    if (!pool.has_inflight() && !(aio_pool && aio_pool->has_inflight())) {
+    auto* aio_pool = backend.aio_thread_pool();
+    if (!pool.has_inflight() && !(aio_pool && aio_pool->has_inflight())
+        && !(syscall_yield_on_io && backend.has_outstanding_io())) {
         return;
     }
     auto t = sched_clock::now();
@@ -3595,6 +3600,9 @@ int reactor::do_run() {
     if (const char* y = std::getenv("SEASTAR_SYSCALL_YIELD_US")) {
         syscall_yield_interval = std::chrono::microseconds(std::atol(y));
     }
+    if (const char* y = std::getenv("SEASTAR_SYSCALL_YIELD_ON_IO")) {
+        syscall_yield_on_io = std::atol(y) != 0;
+    }
     while (true) {
         _cpu_sched.run_some_tasks();
         if (_stopped) {
@@ -3602,7 +3610,7 @@ int reactor::do_run() {
         }
 
         _polls++;
-        maybe_yield_to_syscall_threads(*_thread_pool, _backend->aio_thread_pool());
+        maybe_yield_to_syscall_threads(*_thread_pool, *_backend);
 
         lowres_clock::update(); // Don't delay expiring lowres timers
         if (check_for_work()) {

@@ -80,6 +80,10 @@ struct aio_general_context {
 };
 
 class aio_storage_context {
+public:
+    // Number of iocbs submitted to the kernel or queued for retry and not yet reaped.
+    unsigned outstanding_iocbs() const { return _iocb_pool.outstanding(); }
+private:
     static constexpr unsigned max_aio = 1024;
 
     class iocb_pool {
@@ -270,6 +274,10 @@ public:
     // Some backends create and manage their own thread pool for aio fallbacks.
     // This should return a pointer to one if it exists, or nullptr otherwise.
     virtual thread_pool* aio_thread_pool() noexcept { return nullptr; }
+    // True while storage I/O submitted through this backend has not completed. Completion
+    // work for such I/O (DIO completion, aio fsync) may be pending on kernel workers that
+    // share the reactor's CPU.
+    virtual bool has_outstanding_io() const noexcept { return false; }
 
 protected:
     reactor_backend(uses_blocking_io blocking_io, supports_aio_fdatasync aio_fdatasync)
@@ -347,6 +355,7 @@ public:
     make_pollable_fd_state(file_desc fd, pollable_fd::speculation speculate) override;
 
     thread_pool* aio_thread_pool() noexcept override { return _storage_context.aio_thread_pool(); }
+    bool has_outstanding_io() const noexcept override { return _storage_context.outstanding_iocbs() > 0; }
 };
 
 class reactor_backend_aio : public reactor_backend {
@@ -401,6 +410,7 @@ public:
     make_pollable_fd_state(file_desc fd, pollable_fd::speculation speculate) override;
 
     thread_pool* aio_thread_pool() noexcept override { return _storage_context.aio_thread_pool(); }
+    bool has_outstanding_io() const noexcept override { return _storage_context.outstanding_iocbs() > 0; }
 };
 
 class reactor_backend_uring;
