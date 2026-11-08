@@ -58,6 +58,8 @@ class syscall_work_queue {
     };
 public:
     syscall_work_queue();
+    // True while any submitted item has not yet been reaped by complete().
+    bool has_inflight() const noexcept { return _queue_has_room.available_units() < ssize_t(queue_length); }
     template <typename T>
     future<T> submit(noncopyable_function<T ()> func) noexcept {
       try {

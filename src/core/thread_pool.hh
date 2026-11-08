@@ -68,6 +68,8 @@ public:
         return inter_thread_wq.submit<T>(std::move(func));
     }
     uint64_t count(internal::thread_pool_submit_reason r) const { return metrics.count_for(r); }
+    // True while work submitted to this pool has not been completed and reaped.
+    bool has_inflight() const noexcept { return inter_thread_wq.has_inflight(); }
 
     unsigned complete() { return inter_thread_wq.complete(); }
     // Before we enter interrupt mode, we must make sure that the syscall thread will properly

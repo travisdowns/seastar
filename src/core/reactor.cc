@@ -2726,6 +2726,32 @@ reactor::tasks_processed() const {
     return _global_tasks_processed;
 }
 
+namespace {
+// Minimum interval between sched_yield() calls made while a thread pool has work in flight,
+// so the reactor's same-CPU syscall threads get to run. Zero (the default) disables it.
+thread_local std::chrono::microseconds syscall_yield_interval{0};
+thread_local sched_clock::time_point last_syscall_yield{};
+thread_local uint64_t syscall_yields = 0;
+
+// Yields the CPU to the syscall threads when they have work in flight and the interval since
+// the last yield has elapsed.
+void maybe_yield_to_syscall_threads(thread_pool& pool, thread_pool* aio_pool) noexcept {
+    if (syscall_yield_interval.count() == 0) {
+        return;
+    }
+    if (!pool.has_inflight() && !(aio_pool && aio_pool->has_inflight())) {
+        return;
+    }
+    auto t = sched_clock::now();
+    if (t - last_syscall_yield < syscall_yield_interval) {
+        return;
+    }
+    last_syscall_yield = t;
+    ++syscall_yields;
+    ::sched_yield();
+}
+} // namespace
+
 void reactor::register_metrics() {
 
     namespace sm = seastar::metrics;
@@ -2770,6 +2796,7 @@ void reactor::register_metrics() {
             // total_operations value:DERIVE:0:U
             sm::make_counter("fsyncs", _io_stats.fsyncs, sm::description("Total number of fsync operations")),
             sm::make_counter("aio_retries", _io_stats.aio_retries, sm::description("Total number of IOCB-s re-submitted via thread-pool")),
+            sm::make_counter("syscall_thread_yields", [] { return syscall_yields; }, sm::description("Total sched_yield() calls made to let syscall threads with in-flight work run")),
             // total_operations value:DERIVE:0:U
             io_fallback_counter("aio_fallback", internal::thread_pool_submit_reason::aio_fallback),
             // total_operations value:DERIVE:0:U
@@ -3565,6 +3592,9 @@ int reactor::do_run() {
         return pure_poll_once() || have_more_tasks();
     };
     _cpu_profiler->start();
+    if (const char* y = std::getenv("SEASTAR_SYSCALL_YIELD_US")) {
+        syscall_yield_interval = std::chrono::microseconds(std::atol(y));
+    }
     while (true) {
         _cpu_sched.run_some_tasks();
         if (_stopped) {
@@ -3572,6 +3602,7 @@ int reactor::do_run() {
         }
 
         _polls++;
+        maybe_yield_to_syscall_threads(*_thread_pool, _backend->aio_thread_pool());
 
         lowres_clock::update(); // Don't delay expiring lowres timers
         if (check_for_work()) {
