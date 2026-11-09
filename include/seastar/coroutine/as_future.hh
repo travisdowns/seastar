@@ -46,7 +46,7 @@ public:
 
     template<typename U>
     void await_suspend(std::coroutine_handle<U> hndl SEASTAR_COROUTINE_LOC_PARAM) noexcept {
-        SEASTAR_COROUTINE_LOC_STORE(hndl.promise());
+        SEASTAR_COROUTINE_PREPARE_SUSPEND(hndl.promise());
         if (!CheckPreempt || !_future.available()) {
             _future.set_coroutine(hndl.promise());
         } else {

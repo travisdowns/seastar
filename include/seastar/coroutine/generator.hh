@@ -215,7 +215,7 @@ struct generator_promise_base<Yielded>::yield_awaiter final {
     }
     template <typename Promise>
     std::coroutine_handle<> await_suspend(std::coroutine_handle<Promise> producer SEASTAR_COROUTINE_LOC_PARAM) noexcept {
-        SEASTAR_COROUTINE_LOC_STORE(producer.promise());
+        SEASTAR_COROUTINE_PREPARE_SUSPEND(producer.promise());
         return schedule_or_resume(_consumer);
     }
     void await_resume() noexcept {}
@@ -232,7 +232,7 @@ struct generator_promise_base<Yielded>::copy_awaiter final {
     }
     template <typename Promise>
     std::coroutine_handle<> await_suspend(std::coroutine_handle<Promise> producer SEASTAR_COROUTINE_LOC_PARAM) noexcept {
-        SEASTAR_COROUTINE_LOC_STORE(producer.promise());
+        SEASTAR_COROUTINE_PREPARE_SUSPEND(producer.promise());
         _value_ptr = std::addressof(_value);
         return schedule_or_resume(_consumer);
     }
@@ -403,7 +403,7 @@ public:
 
         template <typename Promise>
         std::coroutine_handle<> await_suspend(std::coroutine_handle<Promise> consumer SEASTAR_COROUTINE_LOC_PARAM) noexcept {
-            SEASTAR_COROUTINE_LOC_STORE(consumer.promise());
+            SEASTAR_COROUTINE_PREPARE_SUSPEND(consumer.promise());
             _gen->_coro.promise()._consumer = consumer;
             _gen->_coro.promise()._waiting_task = &consumer.promise();
             return schedule_or_resume(_gen->_coro);
@@ -643,7 +643,7 @@ public:
     }
     template <typename Promise>
     std::coroutine_handle<> await_suspend(std::coroutine_handle<Promise> producer SEASTAR_COROUTINE_LOC_PARAM) noexcept {
-        SEASTAR_COROUTINE_LOC_STORE(producer.promise());
+        SEASTAR_COROUTINE_PREPARE_SUSPEND(producer.promise());
         return schedule_or_resume(_consumer);
     }
     void await_resume() noexcept {}
@@ -747,7 +747,7 @@ public:
 
         template <typename Promise>
         std::coroutine_handle<> await_suspend(std::coroutine_handle<Promise> consumer SEASTAR_COROUTINE_LOC_PARAM) noexcept {
-            SEASTAR_COROUTINE_LOC_STORE(consumer.promise());
+            SEASTAR_COROUTINE_PREPARE_SUSPEND(consumer.promise());
             // Buffer is empty, need to resume producer to get more elements.
             // Clear the buffer before resuming so the producer starts fresh.
             auto& promise = _gen->_coro.promise();

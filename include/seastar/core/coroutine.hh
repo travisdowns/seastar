@@ -91,7 +91,7 @@ public:
     class promise_type final : public seastar::coroutine_task, public coroutine_allocators {
         seastar::promise<T> _promise;
     public:
-        promise_type() noexcept : coroutine_task(*this) {}
+        promise_type() noexcept : coroutine_task(*this, deferred_setup) {}
         promise_type(promise_type&&) = delete;
         promise_type(const promise_type&) = delete;
 
@@ -137,6 +137,8 @@ public:
         std::suspend_never initial_suspend() noexcept { return { }; }
         std::suspend_never final_suspend() noexcept { return { }; }
 
+        void prepare_suspend(std::source_location sl) noexcept { set_up<promise_type>(sl); }
+
         task* waiting_task() noexcept { return _promise.waiting_task(); }
 
         scheduling_group set_scheduling_group(scheduling_group sg) noexcept {
@@ -151,7 +153,7 @@ public:
    class promise_type final : public seastar::coroutine_task, public coroutine_allocators {
         seastar::promise<> _promise;
     public:
-        promise_type() noexcept : coroutine_task(*this) {}
+        promise_type() noexcept : coroutine_task(*this, deferred_setup) {}
         promise_type(promise_type&&) = delete;
         promise_type(const promise_type&) = delete;
 
@@ -173,6 +175,8 @@ public:
 
         std::suspend_never initial_suspend() noexcept { return { }; }
         std::suspend_never final_suspend() noexcept { return { }; }
+
+        void prepare_suspend(std::source_location sl) noexcept { set_up<promise_type>(sl); }
 
         task* waiting_task() noexcept { return _promise.waiting_task(); }
 
@@ -197,7 +201,7 @@ public:
 
     template<typename U>
     void await_suspend(std::coroutine_handle<U> hndl SEASTAR_COROUTINE_LOC_PARAM) noexcept {
-        SEASTAR_COROUTINE_LOC_STORE(hndl.promise());
+        SEASTAR_COROUTINE_PREPARE_SUSPEND(hndl.promise());
         if (!CheckPreempt || !_future.available()) {
             _future.set_coroutine(hndl.promise());
         } else {
@@ -225,7 +229,7 @@ public:
 
     template<typename U>
     void await_suspend(std::coroutine_handle<U> hndl SEASTAR_COROUTINE_LOC_PARAM) noexcept {
-        SEASTAR_COROUTINE_LOC_STORE(hndl.promise());
+        SEASTAR_COROUTINE_PREPARE_SUSPEND(hndl.promise());
         if (!CheckPreempt || !_future.available()) {
             _future.set_coroutine(hndl.promise());
         } else {

@@ -154,7 +154,7 @@ public:
 
     template<typename T>
     void await_suspend(std::coroutine_handle<T> h SEASTAR_COROUTINE_LOC_PARAM) noexcept {
-        SEASTAR_COROUTINE_LOC_STORE(h.promise());
+        SEASTAR_COROUTINE_PREPARE_SUSPEND(h.promise());
         _when_ready = h;
         _waiting_task = &h.promise();
         resume_or_set_callback();

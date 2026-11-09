@@ -44,7 +44,7 @@ struct exception_awaiter {
 
     template<typename U>
     void await_suspend(std::coroutine_handle<U> hndl SEASTAR_COROUTINE_LOC_PARAM) noexcept {
-      SEASTAR_COROUTINE_LOC_STORE(hndl.promise());
+      SEASTAR_COROUTINE_PREPARE_SUSPEND(hndl.promise());
       execute_involving_handle_destruction_in_await_suspend([hndl, eptr = std::move(eptr)] () mutable {
         hndl.promise().set_exception(std::move(eptr));
         hndl.destroy();

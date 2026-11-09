@@ -28,6 +28,7 @@
 #include <coroutine>
 #include <cstdint>
 #include <cstdlib>
+#include <memory>
 #include <type_traits>
 #include <typeinfo>
 #include <utility>
@@ -100,6 +101,9 @@ class task {
 
     task(scheduling_group sg, bool is_coroutine) noexcept
         : _sg_and_kind(internal::scheduling_group_index(sg) | (is_coroutine ? 0 : runnable_bit)) {}
+    // Leaves _sg_and_kind unset, for a coroutine_task constructed with
+    // deferred_setup.
+    task() noexcept {}
 
     std::source_location& resume_point() noexcept;
 
@@ -186,16 +190,24 @@ inline const task_type_info runnable_task::unregistered_info{&runnable_task::no_
 /// Base of every coroutine promise that the reactor resumes. The coroutine
 /// frame's resume and destroy pointers sit in front of it, where a
 /// runnable_task has its header.
+///
+/// Nothing reads a coroutine's task before the coroutine suspends, and most
+/// coroutines complete without suspending, so a promise can construct its
+/// task with deferred_setup, which leaves every field unset, and fill them in
+/// from its prepare_suspend(). Every awaiter calls
+/// promise.prepare_suspend(), through SEASTAR_COROUTINE_PREPARE_SUSPEND,
+/// before it hands the promise to the reactor or resumes the coroutine
+/// itself.
 class coroutine_task : public task {
     friend class task;
-    std::source_location _resume_point;
+    // In a union so that the deferred_setup constructor leaves it unset.
+    union {
+        std::source_location _resume_point;
+    };
     const task_type_info* _info;
-protected:
-    // Call as coroutine_task(*this) from the constructor of Promise, the
-    // coroutine's promise type.
+
     template <typename Promise>
-    explicit coroutine_task(Promise& promise) noexcept
-            : task(current_scheduling_group(), true), _info(&type_info_of<Promise>) {
+    void check_layout(Promise& promise) noexcept {
         // A promise aligned to at most 16 bytes starts 16 bytes into its
         // frame, after the resume and destroy pointers, with this task at its
         // start. task::run_and_dispose() relies on it.
@@ -203,8 +215,36 @@ protected:
         SEASTAR_ASSERT(std::coroutine_handle<Promise>::from_promise(promise).address()
                 == reinterpret_cast<char*>(static_cast<task*>(this)) - 16);
     }
+protected:
+    struct deferred_setup_t {};
+    static constexpr deferred_setup_t deferred_setup{};
+
+    // Call as coroutine_task(*this) from the constructor of Promise, the
+    // coroutine's promise type.
+    template <typename Promise>
+    explicit coroutine_task(Promise& promise) noexcept
+            : task(current_scheduling_group(), true), _resume_point(), _info(&type_info_of<Promise>) {
+        check_layout(promise);
+    }
+    // Call as coroutine_task(*this, deferred_setup), and call
+    // set_up<Promise>() from Promise::prepare_suspend().
+    template <typename Promise>
+    coroutine_task(Promise& promise, deferred_setup_t) noexcept {
+        check_layout(promise);
+    }
+    // Sets every field, in the current scheduling group. Repeating it at each
+    // suspension writes the values the task already holds, since a coroutine
+    // runs in its own task's scheduling group.
+    template <typename Promise>
+    void set_up(std::source_location sl) noexcept {
+        _sg_and_kind = internal::scheduling_group_index(current_scheduling_group());
+        std::construct_at(&_resume_point, sl);
+        _info = &type_info_of<Promise>;
+    }
     ~coroutine_task() = default;
 public:
+    // For a promise that constructs its task without deferred_setup.
+    void prepare_suspend(std::source_location sl) noexcept { update_resume_point(sl); }
     void update_resume_point(std::source_location sl) noexcept { _resume_point = sl; }
     std::source_location get_resume_point() const noexcept { return _resume_point; }
 };

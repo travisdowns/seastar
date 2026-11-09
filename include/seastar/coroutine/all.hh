@@ -165,7 +165,7 @@ private:
         }
         template <typename U>
         void await_suspend(std::coroutine_handle<U> h SEASTAR_COROUTINE_LOC_PARAM) {
-            SEASTAR_COROUTINE_LOC_STORE(h.promise());
+            SEASTAR_COROUTINE_PREPARE_SUSPEND(h.promise());
             when_ready = h;
             process<0>();
         }

@@ -63,7 +63,8 @@ public:
     }
 
     template<typename U>
-    void await_suspend(std::coroutine_handle<U> hndl) noexcept {
+    void await_suspend(std::coroutine_handle<U> hndl SEASTAR_COROUTINE_LOC_PARAM) noexcept {
+        SEASTAR_COROUTINE_PREPARE_SUSPEND(hndl.promise());
         _resume_or_destroy = try_future_resume_or_destroy_coroutine<T, U>;
         _coroutine_task = &hndl.promise();
         _waiting_task = hndl.promise().waiting_task();

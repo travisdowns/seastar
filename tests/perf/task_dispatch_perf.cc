@@ -46,7 +46,10 @@ constexpr size_t steps = 1000;
 struct requeue {
     bool await_ready() const noexcept { return false; }
     template <typename T>
-    void await_suspend(std::coroutine_handle<T> h) noexcept { schedule(&h.promise()); }
+    void await_suspend(std::coroutine_handle<T> h SEASTAR_COROUTINE_LOC_PARAM) noexcept {
+        SEASTAR_COROUTINE_PREPARE_SUSPEND(h.promise());
+        schedule(&h.promise());
+    }
     void await_resume() const noexcept {}
 };
 
