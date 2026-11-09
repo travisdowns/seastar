@@ -68,6 +68,13 @@
 
 namespace seastar {
 
+namespace internal::rtrace {
+// Defined in reactor.cc (reactor event trace).
+bool st_on() noexcept;
+void fd_ready(uint32_t fd, int opcode, int64_t res) noexcept;
+void arm(int fd, int events, bool known) noexcept;
+}
+
 using namespace std::chrono_literals;
 using namespace internal;
 using namespace internal::linux_abi;
@@ -627,6 +634,10 @@ bool reactor_backend_aio::await_events(int timeout, const sigset_t* active_sigma
             did_work = true;
             auto& event = batch[i];
             auto* desc = get_user_data<kernel_completion>(event);
+            if (internal::rtrace::st_on()) [[unlikely]] {
+                const auto* cb = reinterpret_cast<const linux_abi::iocb*>(event.obj);
+                internal::rtrace::fd_ready(cb->aio_fildes, int(cb->aio_lio_opcode), event.res);
+            }
             desc->complete_with(event.res);
         }
         // For the next iteration, don't use a timeout, since we may have waited already
@@ -735,8 +746,10 @@ future<> reactor_backend_aio::poll(pollable_fd_state& fd, int events) {
     try {
         if (events & fd.events_known) {
             fd.events_known &= ~events;
+            internal::rtrace::arm(fd.fd.get(), events, true);
             return make_ready_future<>();
         }
+        internal::rtrace::arm(fd.fd.get(), events, false);
 
         fd.events_rw = events == (POLLIN|POLLOUT);
 

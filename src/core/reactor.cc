@@ -57,6 +57,8 @@
 #include <sys/eventfd.h>
 #include <poll.h>
 #include <netinet/in.h>
+#include <arpa/inet.h>
+#include <netinet/tcp.h>
 #include <boost/lexical_cast.hpp>
 #include <boost/algorithm/string/classification.hpp>
 #include <boost/algorithm/string/constants.hpp>
@@ -207,6 +209,245 @@ namespace seastar {
 
 seastar::logger seastar_logger("seastar");
 
+namespace internal::rtrace {
+
+// Reactor event trace: a per-shard ring of fixed-size events recorded during a time window and
+// dumped to a file when the window ends. Enabled by SEASTAR_RTRACE_DIR; the window starts at
+// SEASTAR_RTRACE_START (unix seconds, default: at reactor start) and lasts SEASTAR_RTRACE_SECS
+// (default 5). SEASTAR_RTRACE_EVENTS caps the events per shard (default 8M, 32 bytes each).
+// Timestamps are CLOCK_MONOTONIC ns, the clock bpf's ktime_get_ns() uses.
+enum kind : uint8_t {
+    k_run = 1,      // one run_some_tasks call that ran tasks: dur, arg = tasks run
+    k_task = 2,     // one task: dur, a8 = scheduling group, arg = type name pointer, arg2 = task
+    k_poll = 3,     // a poll_once that found work: dur, a16 = mask of pollers that found work
+    k_spin = 4,     // consecutive empty poll_once calls: dur = first start to last end, arg = count
+    k_poller = 5,   // one poller that found work or took > 2 us: dur, a8 = index, a16 = found work
+    k_sleep = 6,    // wait_and_process_events: dur
+    k_fd_ready = 7, // network aio poll completion reaped: a8 = opcode, a16 = revents, arg = fd
+    k_arm = 8,      // poll requested on an fd: a8 = 1 if satisfied by known events, a16 = events, arg = fd
+    k_read = 9,     // socket read syscall: dur, arg = fd | result << 32 (result -1 = EAGAIN)
+    k_send = 10,    // socket send syscall: same layout as k_read
+    k_flush_q = 11, // output_stream queued on the flush poller: arg = stream address
+    k_flush = 12,   // the flush poller ran poll_flush: dur, arg = stream address
+    k_enq = 13,     // task made runnable: a8 = scheduling group, a16 = 1 if urgent, arg = type name, arg2 = task
+};
+
+struct event {
+    uint64_t ts;
+    uint32_t dur;
+    uint8_t kind;
+    uint8_t a8;
+    uint16_t a16;
+    int64_t arg;
+    int64_t arg2;
+};
+static_assert(sizeof(event) == 32);
+
+struct state {
+    event* buf = nullptr;
+    size_t cap = 0;
+    size_t n = 0;
+    bool on = false;
+    bool armed = false;
+    uint64_t start_ns = 0;
+    uint64_t end_ns = 0;
+    unsigned shard = 0;
+    std::string dir;
+};
+
+thread_local state st;
+
+inline uint64_t now_ns() noexcept {
+    ::timespec ts;
+    ::clock_gettime(CLOCK_MONOTONIC, &ts);
+    return uint64_t(ts.tv_sec) * 1000000000ull + uint64_t(ts.tv_nsec);
+}
+
+inline event* rec(uint8_t k, uint64_t ts) noexcept {
+    if (st.n == st.cap) {
+        st.on = false;
+        return nullptr;
+    }
+    auto* e = &st.buf[st.n++];
+    *e = event{ts, 0, k, 0, 0, 0, 0};
+    return e;
+}
+
+inline void rec_dur(uint8_t k, uint64_t t0, uint64_t t1, uint8_t a8, uint16_t a16, int64_t arg) noexcept {
+    if (auto* e = rec(k, t0)) {
+        e->dur = uint32_t(std::min<uint64_t>(t1 - t0, UINT32_MAX));
+        e->a8 = a8;
+        e->a16 = a16;
+        e->arg = arg;
+    }
+}
+
+template <typename T>
+inline int64_t io_arg(int fd, const std::optional<T>& r) noexcept {
+    return int64_t(uint32_t(fd)) | (int64_t(r ? int64_t(*r) : -1) << 32);
+}
+
+void init(unsigned shard) {
+    const char* dir = std::getenv("SEASTAR_RTRACE_DIR");
+    if (!dir) {
+        return;
+    }
+    st.dir = dir;
+    st.shard = shard;
+    const char* ev = std::getenv("SEASTAR_RTRACE_EVENTS");
+    st.cap = ev ? std::strtoull(ev, nullptr, 10) : (8u << 20);
+    void* p = ::mmap(nullptr, st.cap * sizeof(event), PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_POPULATE, -1, 0);
+    if (p == MAP_FAILED) {
+        seastar_logger.error("rtrace: mmap of {} events failed", st.cap);
+        return;
+    }
+    st.buf = static_cast<event*>(p);
+    ::timespec rt;
+    ::clock_gettime(CLOCK_REALTIME, &rt);
+    const double real_now = double(rt.tv_sec) + double(rt.tv_nsec) * 1e-9;
+    const char* start = std::getenv("SEASTAR_RTRACE_START");
+    const double delay = start ? std::max(0.0, std::strtod(start, nullptr) - real_now) : 0.0;
+    const char* secs = std::getenv("SEASTAR_RTRACE_SECS");
+    st.start_ns = now_ns() + uint64_t(delay * 1e9);
+    st.end_ns = st.start_ns + uint64_t((secs ? std::strtod(secs, nullptr) : 5.0) * 1e9);
+    st.armed = true;
+    seastar_logger.info("rtrace: shard {} recording {:.1f} s from now for {} s, up to {} events, into {}",
+                        shard, delay, (st.end_ns - st.start_ns) / 1e9, st.cap, st.dir);
+}
+
+std::string demangle(const char* name) {
+    int status = 0;
+    char* d = abi::__cxa_demangle(name, nullptr, nullptr, &status);
+    std::string r = status == 0 && d ? d : name;
+    ::free(d);
+    for (auto& c : r) {
+        if (c == '\n' || c == '\t') {
+            c = ' ';
+        }
+    }
+    return r;
+}
+
+std::string sock_name(int fd, bool peer) {
+    ::sockaddr_storage ss{};
+    ::socklen_t len = sizeof(ss);
+    int r = peer ? ::getpeername(fd, reinterpret_cast<::sockaddr*>(&ss), &len)
+                 : ::getsockname(fd, reinterpret_cast<::sockaddr*>(&ss), &len);
+    if (r != 0) {
+        return "-";
+    }
+    char host[INET6_ADDRSTRLEN] = {};
+    int port = 0;
+    if (ss.ss_family == AF_INET) {
+        auto* a = reinterpret_cast<::sockaddr_in*>(&ss);
+        ::inet_ntop(AF_INET, &a->sin_addr, host, sizeof(host));
+        port = ntohs(a->sin_port);
+    } else if (ss.ss_family == AF_INET6) {
+        auto* a = reinterpret_cast<::sockaddr_in6*>(&ss);
+        ::inet_ntop(AF_INET6, &a->sin6_addr, host, sizeof(host));
+        port = ntohs(a->sin6_port);
+    } else {
+        return "-";
+    }
+    return fmt::format("{}:{}", host, port);
+}
+
+void dump(const noncopyable_function<void(FILE*)>& describe) {
+    const auto base = fmt::format("{}/rtrace.{}.{}", st.dir, ::getpid(), st.shard);
+    int fd = ::open((base + ".bin").c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd >= 0) {
+        const char* p = reinterpret_cast<const char*>(st.buf);
+        size_t left = st.n * sizeof(event);
+        while (left > 0) {
+            auto w = ::write(fd, p, left);
+            if (w <= 0) {
+                break;
+            }
+            p += w;
+            left -= size_t(w);
+        }
+        ::close(fd);
+    }
+    FILE* f = ::fopen((base + ".txt").c_str(), "w");
+    if (f) {
+        fmt::print(f, "shard {} pid {} events {} cap {} start_ns {} end_ns {}\n", st.shard, ::getpid(), st.n,
+                   st.cap, st.start_ns, st.end_ns);
+        describe(f);
+        std::unordered_set<int64_t> types;
+        std::unordered_set<int> fds;
+        for (size_t i = 0; i < st.n; ++i) {
+            const auto& e = st.buf[i];
+            if (e.kind == k_task || e.kind == k_enq) {
+                types.insert(e.arg);
+            } else if (e.kind == k_read || e.kind == k_send || e.kind == k_fd_ready || e.kind == k_arm) {
+                fds.insert(int(uint32_t(e.arg)));
+            }
+        }
+        for (auto t : types) {
+            fmt::print(f, "type {:#x} {}\n", t, demangle(reinterpret_cast<const char*>(t)));
+        }
+        for (auto d : fds) {
+            int nodelay = -1;
+            ::socklen_t len = sizeof(nodelay);
+            if (::getsockopt(d, IPPROTO_TCP, TCP_NODELAY, &nodelay, &len) != 0) {
+                nodelay = -1;
+            }
+            fmt::print(f, "fd {} {} {} nodelay={}\n", d, sock_name(d, false), sock_name(d, true), nodelay);
+        }
+        ::fclose(f);
+    }
+    seastar_logger.info("rtrace: shard {} wrote {} events to {}.bin", st.shard, st.n, base);
+}
+
+inline void tick(const noncopyable_function<void(FILE*)>& describe) {
+    const auto t = now_ns();
+    if (!st.on && t >= st.start_ns && t < st.end_ns && st.n < st.cap) {
+        st.on = true;
+    }
+    if (t >= st.end_ns) {
+        st.on = false;
+        st.armed = false;
+        dump(describe);
+    }
+}
+
+inline void enq(task* t, unsigned sg, bool urgent) noexcept {
+    if (auto* e = rec(k_enq, now_ns())) {
+        e->a8 = uint8_t(sg);
+        e->a16 = urgent;
+        e->arg = reinterpret_cast<int64_t>(typeid(*t).name());
+        e->arg2 = reinterpret_cast<int64_t>(t);
+    }
+}
+
+// Entry points for reactor_backend.cc, which declares them itself.
+bool st_on() noexcept {
+    return st.on;
+}
+
+void fd_ready(uint32_t fd, int opcode, int64_t res) noexcept {
+    if (st.on) {
+        if (auto* e = rec(k_fd_ready, now_ns())) {
+            e->a8 = uint8_t(opcode);
+            e->a16 = uint16_t(res);
+            e->arg = fd;
+        }
+    }
+}
+
+void arm(int fd, int events, bool known) noexcept {
+    if (st.on) {
+        if (auto* e = rec(k_arm, now_ns())) {
+            e->a8 = known;
+            e->a16 = uint16_t(events);
+            e->arg = fd;
+        }
+    }
+}
+
+}
+
 
 void reactor::update_shares_for_queues(internal::priority_class pc, uint32_t shares) {
     for (auto&& q : _io_queues) {
@@ -318,7 +559,12 @@ future<temporary_buffer<char>>
 reactor::do_read_some(pollable_fd_state& fd, internal::buffer_allocator* ba) {
     return fd.readable().then([this, &fd, ba] {
         auto buffer = ba->allocate_buffer();
+        const bool rt_on = internal::rtrace::st.on;
+        const uint64_t rt0 = rt_on ? internal::rtrace::now_ns() : 0;
         auto r = fd.fd.read(buffer.get_write(), buffer.size());
+        if (rt_on) {
+            internal::rtrace::rec_dur(internal::rtrace::k_read, rt0, internal::rtrace::now_ns(), 0, 0, internal::rtrace::io_arg(fd.fd.get(), r));
+        }
         if (!r) {
             // Speculation failure, try again with real polling this time
             // Note we release the buffer and will reallocate it when poll
@@ -354,7 +600,12 @@ reactor::do_recvmsg(pollable_fd_state& fd, const std::vector<iovec>& iov) {
 future<size_t>
 reactor::do_send(pollable_fd_state& fd, const void* buffer, size_t len) {
     return writeable(fd).then([this, &fd, buffer, len] () mutable {
+        const bool rt_on = internal::rtrace::st.on;
+        const uint64_t rt0 = rt_on ? internal::rtrace::now_ns() : 0;
         auto r = fd.fd.send(buffer, len, MSG_NOSIGNAL);
+        if (rt_on) {
+            internal::rtrace::rec_dur(internal::rtrace::k_send, rt0, internal::rtrace::now_ns(), 0, 0, internal::rtrace::io_arg(fd.fd.get(), r));
+        }
         if (!r) {
             return do_send(fd, buffer, len);
         }
@@ -372,7 +623,12 @@ reactor::do_sendmsg(pollable_fd_state& fd, std::span<iovec> iovs, size_t len) {
         msghdr mh = {};
         mh.msg_iov = iovs.data();
         mh.msg_iovlen = std::min<size_t>(iovs.size(), IOV_MAX);
+        const bool rt_on = internal::rtrace::st.on;
+        const uint64_t rt0 = rt_on ? internal::rtrace::now_ns() : 0;
         auto r = fd.fd.sendmsg(&mh, MSG_NOSIGNAL);
+        if (rt_on) {
+            internal::rtrace::rec_dur(internal::rtrace::k_send, rt0, internal::rtrace::now_ns(), 0, 0, internal::rtrace::io_arg(fd.fd.get(), r));
+        }
         if (!r) {
             return do_sendmsg(fd, iovs, len);
         }
@@ -386,7 +642,12 @@ reactor::do_sendmsg(pollable_fd_state& fd, std::span<iovec> iovs, size_t len) {
 future<size_t>
 reactor::do_writev(pollable_fd_state& fd, std::span<iovec> iovs) {
     return writeable(fd).then([this, &fd, iovs] () mutable {
+        const bool rt_on = internal::rtrace::st.on;
+        const uint64_t rt0 = rt_on ? internal::rtrace::now_ns() : 0;
         auto r = fd.fd.writev(iovs.data(), std::min<size_t>(iovs.size(), IOV_MAX));
+        if (rt_on) {
+            internal::rtrace::rec_dur(internal::rtrace::k_send, rt0, internal::rtrace::now_ns(), 0, 0, internal::rtrace::io_arg(fd.fd.get(), r));
+        }
         if (!r) {
             return do_writev(fd, iovs);
         }
@@ -415,7 +676,12 @@ future<temporary_buffer<char>>
 reactor::do_recv_some(pollable_fd_state& fd, internal::buffer_allocator* ba) {
     return fd.readable().then([this, &fd, ba] {
         auto buffer = ba->allocate_buffer();
+        const bool rt_on = internal::rtrace::st.on;
+        const uint64_t rt0 = rt_on ? internal::rtrace::now_ns() : 0;
         auto r = fd.fd.recv(buffer.get_write(), buffer.size(), MSG_DONTWAIT);
+        if (rt_on) {
+            internal::rtrace::rec_dur(internal::rtrace::k_read, rt0, internal::rtrace::now_ns(), 0, 0, internal::rtrace::io_arg(fd.fd.get(), r));
+        }
         if (!r) {
             return do_recv_some(fd, ba);
         }
@@ -2917,7 +3183,20 @@ bool reactor::task_queue::run_tasks() {
         SEASTAR_REACTOR_TRACE(task_start, _id, _name.c_str());
         internal::task_histogram_add_task(*tsk);
         r._current_task = tsk;
-        tsk->run_and_dispose();
+        if (internal::rtrace::st.on) [[unlikely]] {
+            const auto type = reinterpret_cast<int64_t>(typeid(*tsk).name());
+            const auto t0 = internal::rtrace::now_ns();
+            tsk->run_and_dispose();
+            const auto t1 = internal::rtrace::now_ns();
+            if (auto* e = internal::rtrace::rec(internal::rtrace::k_task, t0)) {
+                e->dur = uint32_t(std::min<uint64_t>(t1 - t0, UINT32_MAX));
+                e->a8 = uint8_t(_id);
+                e->arg = type;
+                e->arg2 = reinterpret_cast<int64_t>(tsk);
+            }
+        } else {
+            tsk->run_and_dispose();
+        }
         r._current_task = nullptr;
         SEASTAR_REACTOR_TRACE(task_end, _id, _tasks_processed);
         ++_tasks_processed;
@@ -2971,7 +3250,13 @@ reactor::flush_tcp_batches() {
     while (!_flush_batching.empty()) {
         auto& os = _flush_batching.front();
         _flush_batching.pop_front();
-        os.poll_flush();
+        if (internal::rtrace::st.on) [[unlikely]] {
+            const auto t0 = internal::rtrace::now_ns();
+            os.poll_flush();
+            internal::rtrace::rec_dur(internal::rtrace::k_flush, t0, internal::rtrace::now_ns(), 0, 0, reinterpret_cast<int64_t>(&os));
+        } else {
+            os.poll_flush();
+        }
     }
     return work;
 }
@@ -3347,6 +3632,9 @@ reactor::task_queue_group::insert_activating_entities() {
 
 void reactor::add_task(task* t) noexcept {
     auto sg = t->group();
+    if (internal::rtrace::st.on) [[unlikely]] {
+        internal::rtrace::enq(t, sg._id, false);
+    }
     auto* q = _task_queues[sg._id].get();
     bool was_empty = q->_q.empty();
     q->_q.push_back(std::move(t));
@@ -3359,6 +3647,9 @@ void reactor::add_task(task* t) noexcept {
 void reactor::add_urgent_task(task* t) noexcept {
     memory::scoped_critical_alloc_section _;
     auto sg = t->group();
+    if (internal::rtrace::st.on) [[unlikely]] {
+        internal::rtrace::enq(t, sg._id, true);
+    }
     auto* q = _task_queues[sg._id].get();
     bool was_empty = q->_q.empty();
     q->_q.push_front(std::move(t));
@@ -3609,8 +3900,33 @@ int reactor::do_run() {
     if (const char* y = std::getenv("SEASTAR_SYSCALL_YIELD_IDLE_ONLY")) {
         syscall_yield_idle_only = std::atol(y) != 0;
     }
+    internal::rtrace::init(_id);
+    const noncopyable_function<void(FILE*)> rtrace_describe = [this] (FILE* f) {
+        for (unsigned i = 0; i < _task_queues.size(); ++i) {
+            if (_task_queues[i]) {
+                fmt::print(f, "sg {} {}\n", i, _task_queues[i]->_name);
+            }
+        }
+        for (unsigned i = 0; i < _pollers.size(); ++i) {
+            const pollfn* p = _pollers[i];
+            fmt::print(f, "poller {} {}\n", i, internal::rtrace::demangle(typeid(*p).name()));
+        }
+    };
     while (true) {
-        _cpu_sched.run_some_tasks();
+        if (internal::rtrace::st.armed) [[unlikely]] {
+            internal::rtrace::tick(rtrace_describe);
+        }
+        if (internal::rtrace::st.on) [[unlikely]] {
+            const auto t0 = internal::rtrace::now_ns();
+            const auto n0 = _global_tasks_processed;
+            _cpu_sched.run_some_tasks();
+            if (_global_tasks_processed != n0) {
+                internal::rtrace::rec_dur(internal::rtrace::k_run, t0, internal::rtrace::now_ns(), 0, 0,
+                                          int64_t(_global_tasks_processed - n0));
+            }
+        } else {
+            _cpu_sched.run_some_tasks();
+        }
         if (_stopped) {
             break;
         }
@@ -3653,7 +3969,13 @@ int reactor::do_run() {
                         _cpu_stall_detector->start_sleep();
                         _cpu_profiler->stop();
 
-                        wait_and_process_events();
+                        if (internal::rtrace::st.on) [[unlikely]] {
+                            const auto t0 = internal::rtrace::now_ns();
+                            wait_and_process_events();
+                            internal::rtrace::rec_dur(internal::rtrace::k_sleep, t0, internal::rtrace::now_ns(), 0, 0, 0);
+                        } else {
+                            wait_and_process_events();
+                        }
                         pollers_exit_interrupt_mode();
 
                         _cpu_profiler->start();
@@ -3724,6 +4046,39 @@ reactor::wait_and_process_events() {
 bool
 reactor::poll_once() {
     bool work = false;
+    if (internal::rtrace::st.on) [[unlikely]] {
+        namespace rt = internal::rtrace;
+        const uint64_t t0 = rt::now_ns();
+        uint64_t tp = t0;
+        uint16_t mask = 0;
+        unsigned i = 0;
+        for (auto c : _pollers) {
+            const bool w = c->poll();
+            work |= w;
+            const uint64_t t1 = rt::now_ns();
+            if (w || t1 - tp > 2000) {
+                rt::rec_dur(rt::k_poller, tp, t1, uint8_t(i), w, 0);
+            }
+            if (w && i < 16) {
+                mask |= uint16_t(1u << i);
+            }
+            tp = t1;
+            ++i;
+        }
+        if (!rt::st.on) {
+            return work;
+        }
+        if (work) {
+            rt::rec_dur(rt::k_poll, t0, tp, 0, mask, 0);
+        } else if (rt::st.n > 0 && rt::st.buf[rt::st.n - 1].kind == rt::k_spin) {
+            auto& e = rt::st.buf[rt::st.n - 1];
+            e.dur = uint32_t(std::min<uint64_t>(tp - e.ts, UINT32_MAX));
+            ++e.arg;
+        } else {
+            rt::rec_dur(rt::k_spin, t0, tp, 0, 0, 1);
+        }
+        return work;
+    }
     for (auto c : _pollers) {
         work |= c->poll();
     }
@@ -5736,6 +6091,11 @@ rename_scheduling_group(scheduling_group sg, sstring new_name, sstring new_short
 namespace internal {
 
 void add_to_flush_poller(output_stream<char>& os) noexcept {
+    if (rtrace::st.on) [[unlikely]] {
+        if (auto* e = rtrace::rec(rtrace::k_flush_q, rtrace::now_ns())) {
+            e->arg = reinterpret_cast<int64_t>(&os);
+        }
+    }
     engine()._flush_batching.push_back(os);
 }
 
