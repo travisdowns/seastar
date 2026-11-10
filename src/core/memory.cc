@@ -447,26 +447,30 @@ class small_pool {
         uint8_t preferred;
         uint8_t fallback;
     };
-    // Objects ready to be allocated. allocate() pops from this list and
-    // nothing else: the allocation stats for every object on it were charged
-    // when it was refilled, so the fast path keeps no counts.
-    free_object* _alloc = nullptr;
-    // Freed objects. deallocate() pushes onto this list, which holds at most
-    // _free_cap objects; when it is full, it is moved to the allocation list
-    // or returned to its spans, and the free stats are charged then.
+    // Free objects, most recently freed first. allocate() pops and deallocate()
+    // pushes, so a freed object is the next one handed out, while it is still in
+    // cache. Neither keeps a count of the list: allocation is the pop alone, and
+    // the stats are worked out when the bookkeeping runs (see _expected).
     free_object* _free = nullptr;
-    // Pushes left before the free list is full. Counting down to zero (rather
-    // than testing for a negative count) compiles to a single decrement of
-    // memory and a branch on x86.
+    // Pushes left until the next bookkeeping. Counting down to zero (rather than
+    // testing for a negative count) compiles to a single decrement of memory and a
+    // branch on x86.
     unsigned long _free_room = 1;
-    // Current capacity of the free list: 1 (so every free goes straight to the
-    // slow path) until cpu_pages::initialize() raises it to _free_cap. Threads
-    // that are not reactor threads therefore never hold freed objects.
+    // Pushes between bookkeepings: 1 (so every free goes straight to the slow path)
+    // until cpu_pages::initialize() raises it to _free_cap.
     unsigned long _free_limit = 1;
+    // What the list would hold now if nothing had been allocated since the last
+    // bookkeeping, not counting the pushes since then: the length the bookkeeping
+    // left, plus objects refills added. Allocations since then are
+    // _expected + pushes - (current length).
+    unsigned _expected = 0;
     unsigned _object_size;
     span_sizes _span_sizes;
     unsigned _free_cap;
-    // Number of objects a refill from the spans puts on the allocation list.
+    // Objects the bookkeeping keeps on the list (the most recently freed); the rest
+    // go back to their spans.
+    unsigned _keep;
+    // Number of objects a refill from the spans puts on the list.
     unsigned _refill_batch;
     unsigned _pages_in_use = 0;
     // Flag to indicate whether this pool stores sampled allocations.
@@ -485,11 +489,12 @@ public:
     inline void* allocate();
     inline void* try_allocate();
     void deallocate(void* object);
-    /// Pushes an object onto the free list. Returns true if that filled the
-    /// list, in which case the caller must call free_list_full().
+    /// Pushes an object onto the list. Returns true when the bookkeeping is due,
+    /// in which case the caller must call bookkeeping().
     inline bool push_free(void* object);
-    /// Called when a push fills the free list.
-    [[gnu::noinline]] void free_list_full() noexcept;
+    /// Charges the stats for the allocations and frees since the last
+    /// bookkeeping, and trims the list to _keep objects.
+    [[gnu::noinline]] void bookkeeping() noexcept;
     unsigned object_size() const { return _object_size; }
     /// See _sampled_pool
     bool is_sampled_pool() const {
@@ -503,30 +508,23 @@ public:
     static constexpr unsigned size_to_idx(unsigned size);
     static constexpr unsigned idx_to_size(unsigned idx);
     allocation_site_ptr& alloc_site_holder(void* ptr);
-    /// Refills the allocation list, from the free list if it has objects and
-    /// otherwise from the spans, and charges the allocation stats for every
-    /// object put on it. Returns the number of objects added (0 if out of
-    /// memory).
+    /// Refills the (empty) list from the spans, after charging the stats for the
+    /// allocations and frees since the last bookkeeping. Returns the number of
+    /// objects added (0 if out of memory).
     [[gnu::noinline]] unsigned refill();
-    /// Number of objects on the allocation list (walks it).
-    unsigned alloc_list_length() const;
-    /// Number of objects on the free list.
-    unsigned free_list_length() const { return _free_limit - _free_room; }
-    /// Raises the free list capacity from 1 to its real size (reactor threads).
+    /// Number of objects on the list (walks it).
+    unsigned list_length() const;
+    /// Allocations and frees since the last bookkeeping, not yet in the stats.
+    std::pair<unsigned, unsigned> pending_stats() const;
+    /// Raises the pushes between bookkeepings from 1 to their real number
+    /// (reactor threads).
     void enable_free_list() { _free_limit = _free_room = _free_cap; }
 private:
-    inline void* pop_alloc();
-    /// Moves the whole free list onto the (empty) allocation list, charging
-    /// the free and allocation stats for its objects. Returns how many moved.
-    unsigned move_free_to_alloc();
-    /// Returns every object on the free list to its span.
-    void release_free_list();
-    /// Removes from the free list every object that does not belong to this
-    /// pool and frees it through the regular path. Sized free pushes without
-    /// checking the pointer, so this is where foreign, large, sampled or
-    /// wrongly sized objects are caught, before anything is reused. Returns the
-    /// number of objects left and resets the free list room.
-    unsigned filter_free_list();
+    inline void* pop();
+    /// Adds n allocations and f frees to the stats.
+    void charge(unsigned n, unsigned f);
+    /// Returns every object of the list starting at head to its span.
+    void release(free_object* head);
     friend seastar::internal::log_buf::inserter_iterator do_dump_memory_diagnostics(seastar::internal::log_buf::inserter_iterator);
 };
 
@@ -589,9 +587,10 @@ constexpr small_pool::small_pool(unsigned object_size, bool is_sampled) noexcept
     _span_sizes.preferred = min_waste_span_size ? min_waste_span_size : _span_sizes.fallback;
 
     auto max_free = std::max<unsigned>(100, span_bytes() * 2 / _object_size);
+    // At most _keep + _free_cap = max_free objects are ever on the list.
     _free_cap = max_free / 2;
+    _keep = max_free - _free_cap;
     _refill_batch = max_free * 3 / 4;
-    _alloc = nullptr;
     _free = nullptr;
 }
 
@@ -1298,7 +1297,7 @@ struct no_size {};
 template <typename S>
 requires std::same_as<S, size_t> || std::same_as<S, no_size>
 [[gnu::noinline]]
-static void free_slowpath(void* obj, S size) {
+static void free_slowpath(void* obj, S size) noexcept {
     if (cpu_pages::is_local_pointer(obj)) {
         if constexpr (std::is_same_v<decltype(size), no_size>) {
             cpu_mem.free(obj);
@@ -1571,13 +1570,13 @@ void cpu_pages::set_min_free_pages(size_t pages) {
 }
 
 /**
- * Remove the next object from the allocation list and return it.
+ * Remove the next object from the list and return it.
  * It must exist (caller must check) or UB.
  */
 void *
-small_pool::pop_alloc() {
-    auto* obj = _alloc;
-    _alloc = _alloc->next;
+small_pool::pop() {
+    auto* obj = _free;
+    _free = _free->next;
     return obj;
 }
 
@@ -1586,23 +1585,23 @@ small_pool::pop_alloc() {
 // falls back to the emergency pool in case malloc() returns nullptr.
 void*
 small_pool::allocate() {
-    if (__builtin_expect(!_alloc, false) && !refill()) {
+    if (__builtin_expect(!_free, false) && !refill()) {
         return nullptr;
     }
-    return pop_alloc();
+    return pop();
 }
 
 /**
- * Like allocate(), but never refills the allocation list: if it is empty,
- * return nullptr and let the caller deal with it.
+ * Like allocate(), but never refills the list: if it is empty, return nullptr
+ * and let the caller deal with it.
  *
- * Since the allocation list of a thread which never allocated from the seastar
- * allocator is empty, this can be called on any thread, even one whose
- * cpu_pages was not initialized yet.
+ * Since the list of a thread which never allocated from the seastar allocator is
+ * empty, this can be called on any thread, even one whose cpu_pages was not
+ * initialized yet.
  */
 void*
 small_pool::try_allocate() {
-    return __builtin_expect((bool)_alloc, true) ? pop_alloc() : nullptr;
+    return __builtin_expect((bool)_free, true) ? pop() : nullptr;
 }
 
 bool
@@ -1616,81 +1615,75 @@ small_pool::push_free(void* object) {
 void
 small_pool::deallocate(void* object) {
     if (push_free(object)) {
-        free_list_full();
+        bookkeeping();
     }
 }
 
-/// free_list_full() for the small pool with index idx, as a free function. An
+#ifndef SEASTAR_HEAPPROF
+/// bookkeeping() for the small pool with index idx, as a free function. An
 /// inlined sized free passes the size class, a constant where the size is, so its
 /// slow path is an immediate load and a call, with nothing to compute the pool's
 /// address from.
 [[gnu::noinline, gnu::cold]]
-static void small_pool_full(unsigned idx) noexcept {
-    cpu_mem.small_pools[idx].free_list_full();
+static void small_pool_bookkeeping(unsigned idx) noexcept {
+    cpu_mem.small_pools[idx].bookkeeping();
 }
+#endif
 
 unsigned
-small_pool::alloc_list_length() const {
+small_pool::list_length() const {
     unsigned n = 0;
-    for (auto* o = _alloc; o; o = o->next) {
+    for (auto* o = _free; o; o = o->next) {
         ++n;
     }
     return n;
 }
 
-unsigned
-small_pool::filter_free_list() {
-    unsigned n = 0;
-    free_object** link = &_free;
-    while (auto* o = *link) {
-        if (__builtin_expect(cpu_pages::is_local_pointer(o) && cpu_mem.to_page(o)->pool == this, true)) {
-            link = &o->next;
-            ++n;
-        } else {
-            *link = o->next;
-            if (cpu_pages::is_local_pointer(o)) {
-                cpu_mem.free(o);
-            } else {
-                cpu_pages::do_foreign_free(o);
-            }
-        }
-    }
-    _free_room = _free_limit;
-    return n;
-}
-
-unsigned
-small_pool::move_free_to_alloc() {
-    auto n = filter_free_list();
-    _alloc = _free;
-    _free = nullptr;
-    alloc_stats::increment_local(alloc_stats::types::frees, n);
-    alloc_stats::increment_local(alloc_stats::types::allocs, n);
-    alloc_stats::increment_local(alloc_stats::types::total_bytes_allocated, uint64_t(n) * _object_size);
-    return n;
+std::pair<unsigned, unsigned>
+small_pool::pending_stats() const {
+    unsigned pushes = _free_limit - _free_room;
+    return {_expected + pushes - list_length(), pushes};
 }
 
 void
-small_pool::free_list_full() noexcept {
-    if (!_alloc) {
-        move_free_to_alloc();
-    } else {
-        alloc_stats::increment_local(alloc_stats::types::frees, filter_free_list());
-        release_free_list();
+small_pool::charge(unsigned n, unsigned f) {
+    alloc_stats::increment_local(alloc_stats::types::allocs, n);
+    alloc_stats::increment_local(alloc_stats::types::total_bytes_allocated, uint64_t(n) * _object_size);
+    alloc_stats::increment_local(alloc_stats::types::frees, f);
+}
+
+void
+small_pool::bookkeeping() noexcept {
+    unsigned pushes = _free_limit - _free_room;
+    // Walk the list: count it, and find where the _keep most recently freed
+    // objects end.
+    unsigned len = 0;
+    free_object* last_kept = nullptr;
+    for (auto* o = _free; o; o = o->next) {
+        if (++len == _keep) {
+            last_kept = o;
+        }
     }
+    charge(_expected + pushes - len, pushes);
+    if (last_kept && last_kept->next) {
+        release(std::exchange(last_kept->next, nullptr));
+        len = _keep;
+    }
+    _expected = len;
+    _free_room = _free_limit;
 }
 
 unsigned
 small_pool::refill() {
-    if (_free) {
-        if (auto n = move_free_to_alloc()) {
-            return n;
-        }
-    }
+    // The list is empty, so everything allocated since the last bookkeeping is
+    // known without a walk.
+    unsigned pushes = _free_limit - _free_room;
+    charge(_expected + pushes, pushes);
+    _free_room = _free_limit;
     unsigned n = 0;
     auto push = [&] (free_object* obj) {
-        obj->next = _alloc;
-        _alloc = obj;
+        obj->next = _free;
+        _free = obj;
         ++n;
     };
     while (!_span_list.empty() && n < _refill_batch) {
@@ -1727,16 +1720,15 @@ small_pool::refill() {
             ++span->nr_small_alloc;
         }
     }
-    alloc_stats::increment_local(alloc_stats::types::allocs, n);
-    alloc_stats::increment_local(alloc_stats::types::total_bytes_allocated, uint64_t(n) * _object_size);
+    _expected = n;
     return n;
 }
 
 void
-small_pool::release_free_list() {
-    while (_free) {
-        auto obj = _free;
-        _free = _free->next;
+small_pool::release(free_object* head) {
+    while (head) {
+        auto obj = head;
+        head = head->next;
         page* span = cpu_mem.to_page(obj);
         span -= span->offset_in_span;
         if (!span->freelist) {
@@ -1751,7 +1743,6 @@ small_pool::release_free_list() {
             cpu_mem.free_span(span - cpu_mem.pages, span->span_size);
         }
     }
-    _free_room = _free_limit;
 }
 
 void
@@ -2083,21 +2074,24 @@ inline void* allocate_aligned(size_t align, size_t size) {
 template <typename S = no_size>
 [[gnu::always_inline]]
 inline void free(void* obj, S size = {}) {
+#ifndef SEASTAR_HEAPPROF
     if constexpr (std::is_same_v<S, size_t>) {
-        // With the size known, push onto the pool for that size without
-        // looking at the pointer; the pool checks every object before reusing
-        // it (small_pool::filter_free_list).
-        if (__builtin_expect(obj != nullptr && size <= max_small_allocation, true)) {
+        // With the size known, a local pointer goes straight onto the pool for
+        // that size, with no page lookup. The local check also rejects null and
+        // pointers from other shards, which free_slowpath() handles. (With heap
+        // profiling the page lookup is needed to find sampled objects, so sized
+        // frees take the regular path below.)
+        if (__builtin_expect(cpu_pages::is_local_pointer(obj) && size <= max_small_allocation, true)) {
             auto idx = small_pool::size_to_idx(std::max(size, sizeof(free_object)));
             if (cpu_mem.small_pools[idx].push_free(obj)) {
-                small_pool_full(idx);
+                small_pool_bookkeeping(idx);
             }
             return;
         }
-        if (!obj) {
-            return;
-        }
+        free_slowpath(obj, size);
+        return;
     }
+#endif
     if (!__builtin_expect(cpu_pages::try_free_fastpath(obj), true)) {
         free_slowpath(obj, size);
     }
@@ -2272,15 +2266,13 @@ statistics stats() {
     auto frees = alloc_stats::get(alloc_stats::types::frees);
     auto bytes_allocated = alloc_stats::get(alloc_stats::types::total_bytes_allocated);
     if (is_reactor_thread) {
-        // Small pools charge the allocation stats for a whole batch when they
-        // refill their allocation list, and the free stats when their free list
-        // is drained. Take out the objects charged but not handed out yet, and
-        // add the ones freed but not charged yet.
+        // Small pools charge their allocation and free stats at each
+        // bookkeeping; add what happened since.
         auto adjust = [&] (const small_pool& sp) {
-            auto pending = sp.alloc_list_length();
-            allocs -= pending;
-            bytes_allocated -= uint64_t(pending) * sp.object_size();
-            frees += sp.free_list_length();
+            auto [pending_allocs, pending_frees] = sp.pending_stats();
+            allocs += pending_allocs;
+            bytes_allocated += uint64_t(pending_allocs) * sp.object_size();
+            frees += pending_frees;
         };
         for (unsigned i = 0; i < cpu_mem.small_pools.nr_small_pools; i++) {
             adjust(cpu_mem.small_pools[i]);
@@ -2443,7 +2435,7 @@ seastar::internal::log_buf::inserter_iterator do_dump_memory_diagnostics(seastar
         }
 
         // For the small pools, there are two types of free objects:
-        // Pool objects are on the allocation list (sp._alloc) or the free list (sp._free)
+        // Pool freelist objects are pointed to by sp._free
         // Span freelist objects are those removed from the pool freelist when that list
         // becomes too large: they are instead attached to the spans allocated to this
         // pool. To count this second category, we iterate over the spans below.
@@ -2455,7 +2447,7 @@ seastar::internal::log_buf::inserter_iterator do_dump_memory_diagnostics(seastar
             span_freelist_objs += capacity_in_objects - span.nr_small_alloc;
             front = span.link._next;
         }
-        const auto free_objs = sp.alloc_list_length() + sp.free_list_length() + span_freelist_objs; // pool + span free objects
+        const auto free_objs = sp.list_length() + span_freelist_objs; // pool + span free objects
         const auto use_count = sp._pages_in_use * page_size / sp.object_size() - free_objs;
         auto memory = sp._pages_in_use * page_size;
         const auto unused = free_objs * sp.object_size();
