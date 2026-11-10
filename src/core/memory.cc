@@ -1868,6 +1868,9 @@ static void * maybe_system_fallback(void *ptr, size_t align, size_t size) {
 }
 
 
+// Kept out of line even when a profile marks it hot (it runs on every refill),
+// so the inlined fast path stays small.
+[[gnu::noinline]]
 void *allocate_slowpath(size_t size) {
     if (!is_reactor_thread) {
         if (original_malloc_func) {
@@ -1950,6 +1953,9 @@ static inline size_t adjust_aligned_allocation_size(size_t align, size_t size) {
     return size;
 }
 
+// Kept out of line even when a profile marks it hot (it runs on every refill),
+// so the inlined fast path stays small.
+[[gnu::noinline]]
 void* allocate_aligned_slowpath(size_t align, size_t size) {
     if (!is_reactor_thread) {
         if (original_aligned_alloc_func) {
