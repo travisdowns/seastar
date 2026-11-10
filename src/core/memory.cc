@@ -515,7 +515,7 @@ private:
     /// the free and allocation stats for its objects. Returns how many moved.
     unsigned move_free_to_alloc();
     /// Called when a push fills the free list.
-    [[gnu::noinline]] void free_list_full();
+    [[gnu::noinline]] void free_list_full() noexcept;
     /// Returns every object on the free list to its span.
     void release_free_list();
     /// Removes from the free list every object that does not belong to this
@@ -1654,7 +1654,7 @@ small_pool::move_free_to_alloc() {
 }
 
 void
-small_pool::free_list_full() {
+small_pool::free_list_full() noexcept {
     if (!_alloc) {
         move_free_to_alloc();
     } else {
