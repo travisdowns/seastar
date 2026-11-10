@@ -438,12 +438,21 @@ class small_pool {
         uint8_t preferred;
         uint8_t fallback;
     };
+    // Objects ready to be allocated. allocate() pops from this list and
+    // nothing else: the allocation stats for every object on it were charged
+    // when it was refilled, so the fast path keeps no counts.
+    free_object* _alloc = nullptr;
+    // Freed objects. deallocate() pushes onto this list, which holds at most
+    // _free_cap objects; when it overflows, it is moved to the allocation list
+    // or returned to its spans, and the free stats are charged then.
     free_object* _free = nullptr;
+    // Pushes left before the free list overflows (it overflows at -1).
+    long _free_room;
     unsigned _object_size;
     span_sizes _span_sizes;
-    unsigned _free_count = 0;
-    unsigned _min_free;
-    unsigned _max_free;
+    unsigned _free_cap;
+    // Number of objects a refill from the spans puts on the allocation list.
+    unsigned _refill_batch;
     unsigned _pages_in_use = 0;
     // Flag to indicate whether this pool stores sampled allocations.
     // When freeing small allocations this flag is checked to see whether an
@@ -474,10 +483,24 @@ public:
     static constexpr unsigned size_to_idx(unsigned size);
     static constexpr unsigned idx_to_size(unsigned idx);
     allocation_site_ptr& alloc_site_holder(void* ptr);
+    /// Refills the allocation list, from the free list if it has objects and
+    /// otherwise from the spans, and charges the allocation stats for every
+    /// object put on it. Returns the number of objects added (0 if out of
+    /// memory).
+    [[gnu::noinline]] unsigned refill();
+    /// Number of objects on the allocation list (walks it).
+    unsigned alloc_list_length() const;
+    /// Number of objects on the free list.
+    unsigned free_list_length() const { return _free_cap - _free_room; }
 private:
-    inline void* pop_free();
-    [[gnu::noinline]] void* add_more_objects();
-    void trim_free_list();
+    inline void* pop_alloc();
+    /// Moves the whole free list onto the (empty) allocation list, charging
+    /// the free and allocation stats for its objects. Returns how many moved.
+    unsigned move_free_to_alloc();
+    /// Called when a push overflows the free list.
+    [[gnu::noinline]] void free_list_full();
+    /// Returns every object on the free list to its span.
+    void release_free_list();
     friend seastar::internal::log_buf::inserter_iterator do_dump_memory_diagnostics(seastar::internal::log_buf::inserter_iterator);
 };
 
@@ -539,8 +562,11 @@ constexpr small_pool::small_pool(unsigned object_size, bool is_sampled) noexcept
     }
     _span_sizes.preferred = min_waste_span_size ? min_waste_span_size : _span_sizes.fallback;
 
-    _max_free = std::max<unsigned>(100, span_bytes() * 2 / _object_size);
-    _min_free = _max_free / 2;
+    auto max_free = std::max<unsigned>(100, span_bytes() * 2 / _object_size);
+    _free_cap = max_free / 2;
+    _free_room = _free_cap;
+    _refill_batch = max_free * 3 / 4;
+    _alloc = nullptr;
     _free = nullptr;
 }
 
@@ -1161,7 +1187,6 @@ bool cpu_pages::drain_cross_cpu_freelist() {
     auto p = xcpu_freelist.exchange(nullptr, std::memory_order_acquire);
     while (p) {
         auto n = p->next;
-        alloc_stats::increment_local(alloc_stats::types::frees);
         free(p);
         p = n;
     }
@@ -1181,6 +1206,7 @@ inline void cpu_pages::free(void* ptr) {
 #endif
         pool.deallocate(ptr);
     } else {
+        alloc_stats::increment_local(alloc_stats::types::frees);
         free_large(ptr);
     }
 }
@@ -1202,6 +1228,7 @@ void cpu_pages::free(void* ptr, size_t size) {
         auto pool = &small_pools[small_pool::size_to_idx(size)];
         pool->deallocate(ptr);
     } else {
+        alloc_stats::increment_local(alloc_stats::types::frees);
         free_large(ptr);
     }
 #endif
@@ -1229,7 +1256,6 @@ cpu_pages::try_free_fastpath(void* ptr) {
     if (__builtin_expect(is_local_pointer(ptr), true)) {
         auto pool = cpu_mem.to_page(ptr)->pool;
         if (__builtin_expect(pool && !pool->is_sampled_pool(), true)) {
-            alloc_stats::increment_local(alloc_stats::types::frees);
             pool->deallocate(ptr);
             return true;
         }
@@ -1249,7 +1275,6 @@ requires std::same_as<S, size_t> || std::same_as<S, no_size>
 [[gnu::noinline]]
 static void free_slowpath(void* obj, S size) {
     if (cpu_pages::is_local_pointer(obj)) {
-        alloc_stats::increment_local(alloc_stats::types::frees);
         if constexpr (std::is_same_v<decltype(size), no_size>) {
             cpu_mem.free(obj);
         } else {
@@ -1517,14 +1542,13 @@ void cpu_pages::set_min_free_pages(size_t pages) {
 }
 
 /**
- * Remove the next object from the freelist and return it.
+ * Remove the next object from the allocation list and return it.
  * It must exist (caller must check) or UB.
  */
 void *
-small_pool::pop_free() {
-    auto* obj = _free;
-    _free = _free->next;
-    --_free_count;
+small_pool::pop_alloc() {
+    auto* obj = _alloc;
+    _alloc = _alloc->next;
     return obj;
 }
 
@@ -1533,20 +1557,23 @@ small_pool::pop_free() {
 // falls back to the emergency pool in case malloc() returns nullptr.
 void*
 small_pool::allocate() {
-    return __builtin_expect((bool)_free, true) ? pop_free() : add_more_objects();
+    if (__builtin_expect(!_alloc, false) && !refill()) {
+        return nullptr;
+    }
+    return pop_alloc();
 }
 
 /**
- * Like allocate(), but never refills the free list: if it is empty, return
- * nullptr and let the caller deal with it.
+ * Like allocate(), but never refills the allocation list: if it is empty,
+ * return nullptr and let the caller deal with it.
  *
- * Since the free list of a thread which never allocated from the seastar
+ * Since the allocation list of a thread which never allocated from the seastar
  * allocator is empty, this can be called on any thread, even one whose
  * cpu_pages was not initialized yet.
  */
 void*
 small_pool::try_allocate() {
-    return __builtin_expect((bool)_free, true) ? pop_free() : nullptr;
+    return __builtin_expect((bool)_alloc, true) ? pop_alloc() : nullptr;
 }
 
 void
@@ -1554,28 +1581,64 @@ small_pool::deallocate(void* object) {
     auto o = reinterpret_cast<free_object*>(object);
     o->next = _free;
     _free = o;
-    ++_free_count;
-    if (_free_count >= _max_free) {
-        trim_free_list();
+    if (__builtin_expect(--_free_room < 0, false)) {
+        free_list_full();
     }
 }
 
-void*
-small_pool::add_more_objects() {
-    auto goal = (_min_free + _max_free) / 2;
-    while (!_span_list.empty() && _free_count < goal) {
+unsigned
+small_pool::alloc_list_length() const {
+    unsigned n = 0;
+    for (auto* o = _alloc; o; o = o->next) {
+        ++n;
+    }
+    return n;
+}
+
+unsigned
+small_pool::move_free_to_alloc() {
+    auto n = free_list_length();
+    _alloc = _free;
+    _free = nullptr;
+    _free_room = _free_cap;
+    alloc_stats::increment_local(alloc_stats::types::frees, n);
+    alloc_stats::increment_local(alloc_stats::types::allocs, n);
+    alloc_stats::increment_local(alloc_stats::types::total_bytes_allocated, uint64_t(n) * _object_size);
+    return n;
+}
+
+void
+small_pool::free_list_full() {
+    if (!_alloc) {
+        move_free_to_alloc();
+    } else {
+        alloc_stats::increment_local(alloc_stats::types::frees, free_list_length());
+        release_free_list();
+    }
+}
+
+unsigned
+small_pool::refill() {
+    if (_free) {
+        return move_free_to_alloc();
+    }
+    unsigned n = 0;
+    auto push = [&] (free_object* obj) {
+        obj->next = _alloc;
+        _alloc = obj;
+        ++n;
+    };
+    while (!_span_list.empty() && n < _refill_batch) {
         page& span = _span_list.front(cpu_mem.pages);
         _span_list.pop_front(cpu_mem.pages);
         while (span.freelist) {
             auto obj = span.freelist;
             span.freelist = span.freelist->next;
-            obj->next = _free;
-            _free = obj;
-            ++_free_count;
+            push(obj);
             ++span.nr_small_alloc;
         }
     }
-    while (_free_count < goal) {
+    while (n < _refill_batch) {
         auto span_size = _span_sizes.preferred;
         auto data = reinterpret_cast<char*>(cpu_mem.allocate_large(span_size, false));
         if (!data) {
@@ -1595,24 +1658,20 @@ small_pool::add_more_objects() {
         span->nr_small_alloc = 0;
         span->freelist = nullptr;
         for (size_t offset = 0; offset <= span_size * page_size - _object_size; offset += _object_size) {
-            auto h = reinterpret_cast<free_object*>(data + offset);
-            h->next = _free;
-            _free = h;
-            ++_free_count;
+            push(reinterpret_cast<free_object*>(data + offset));
             ++span->nr_small_alloc;
         }
     }
-
-    return _free ? pop_free() : nullptr;
+    alloc_stats::increment_local(alloc_stats::types::allocs, n);
+    alloc_stats::increment_local(alloc_stats::types::total_bytes_allocated, uint64_t(n) * _object_size);
+    return n;
 }
 
 void
-small_pool::trim_free_list() {
-    auto goal = (_min_free + _max_free) / 2;
-    while (_free && _free_count > goal) {
+small_pool::release_free_list() {
+    while (_free) {
         auto obj = _free;
         _free = _free->next;
-        --_free_count;
         page* span = cpu_mem.to_page(obj);
         span -= span->offset_in_span;
         if (!span->freelist) {
@@ -1627,6 +1686,7 @@ small_pool::trim_free_list() {
             cpu_mem.free_span(span - cpu_mem.pages, span->span_size);
         }
     }
+    _free_room = _free_cap;
 }
 
 void
@@ -1726,18 +1786,6 @@ inline void* try_allocate_from_small_pool(size_t size) {
     return pool.try_allocate();
 }
 
-template<alignment_t alignment>
-void* allocate_from_small_pool(size_t size)
-{
-    if constexpr (alignment == alignment_t::aligned) {
-        size = 1 << log2ceil(size);
-    }
-    auto idx = small_pool::size_to_idx(size);
-    auto& pool = cpu_mem.small_pools[idx];
-    dassert(size <= pool.object_size());
-    return pool.allocate();
-}
-
 /**
  * Common handling code when a pointer (possibly null) has
  * been returned by any allocation path.
@@ -1754,6 +1802,54 @@ static inline void* finish_allocation(void* ptr, size_t size) {
 #endif
     }
     return ptr;
+}
+
+/**
+ * Like finish_allocation(), for an allocation served by a small pool: the
+ * allocation stats were already charged when the pool's allocation list was
+ * refilled, so only a failure is counted here.
+ */
+[[gnu::always_inline]]
+static inline void* finish_small_allocation(void* ptr, size_t size) {
+    if (__builtin_expect(!ptr, false)) {
+        alloc_stats::increment_local(alloc_stats::types::allocs);
+        on_allocation_failure(size);
+    } else {
+#ifdef SEASTAR_DEBUG_ALLOCATIONS
+        std::memset(ptr, debug_allocation_pattern, size);
+#endif
+    }
+    return ptr;
+}
+
+/**
+ * Slow path of a small allocation: refills the pool's allocation list and
+ * charges the refilled bytes to the heap-profiling sampler, as if they were all
+ * allocated now. If that crosses the sampling interval, this allocation is the
+ * sample.
+ */
+template<alignment_t alignment>
+static void* allocate_small_slowpath(size_t size) {
+    size_t pool_size = size;
+    if constexpr (alignment == alignment_t::aligned) {
+        pool_size = 1 << log2ceil(size);
+    }
+    auto& pool = cpu_mem.small_pools[small_pool::size_to_idx(pool_size)];
+    if (auto ptr = pool.try_allocate()) {
+        return ptr;
+    }
+    auto n = pool.refill();
+#ifdef SEASTAR_HEAPPROF
+    if (n) {
+        auto bytes = size_t(n) * pool.object_size();
+        if (cpu_mem.maybe_sample(bytes) && cpu_mem.definitely_sample(bytes)) {
+            if (auto ptr = allocate_from_sampled_small_pool<alignment>(size)) {
+                return ptr;
+            }
+        }
+    }
+#endif
+    return n ? pool.try_allocate() : nullptr;
 }
 
 static void * maybe_system_fallback(void *ptr, size_t align, size_t size) {
@@ -1807,25 +1903,13 @@ void *allocate_slowpath(size_t size) {
             }
         }
     }
-    // On the fast path we've already called maybe_sample (foreign threads
-    // never sample, as their sampler is disabled, so calling it there is
-    // harmless).
-    bool should_sample = cpu_mem.definitely_sample(size);
-    void* ptr;
     if (size <= max_small_allocation) {
-#ifdef SEASTAR_HEAPPROF
-        if (should_sample) {
-            ptr = allocate_from_sampled_small_pool<alignment_t::unaligned>(size);
-        } else
-#endif
-        {
-            ptr = allocate_from_small_pool<alignment_t::unaligned>(size);
-        }
-    } else {
-        ptr = allocate_large(size, should_sample);
-        ptr = maybe_system_fallback(ptr, 0, size);
+        return finish_small_allocation(allocate_small_slowpath<alignment_t::unaligned>(size), size);
     }
-
+    // Foreign threads never sample, as their sampler is disabled.
+    bool should_sample = cpu_mem.maybe_sample(size) && cpu_mem.definitely_sample(size);
+    auto ptr = allocate_large(size, should_sample);
+    ptr = maybe_system_fallback(ptr, 0, size);
     return finish_allocation(ptr, size);
 }
 
@@ -1838,14 +1922,15 @@ void *allocate_slowpath(size_t size) {
 [[gnu::always_inline]]
 inline void* allocate(size_t size) {
     size = std::max(size, sizeof(free_object));
-    if (__builtin_expect(!cpu_mem.maybe_sample(size) && size <= max_small_allocation, true)) {
+    if (__builtin_expect(size <= max_small_allocation, true)) {
         // Note we don't check is_reactor_thread here: a thread which doesn't
-        // use the seastar allocator has empty small pool free lists, so the
-        // allocation fails and we fall into the slow path, which sorts out
+        // use the seastar allocator has empty small pool allocation lists, so
+        // the allocation fails and we fall into the slow path, which sorts out
         // where the memory should come from. This keeps the fast path free of
-        // an extra thread-local load and branch.
+        // an extra thread-local load and branch. Sampling and stats are
+        // handled when the slow path refills the allocation list.
         if (auto ptr = try_allocate_from_small_pool<alignment_t::unaligned>(size)) {
-            return finish_allocation(ptr, size);
+            return finish_small_allocation(ptr, size);
         }
     }
 
@@ -1874,26 +1959,15 @@ void* allocate_aligned_slowpath(size_t align, size_t size) {
         init_cpu_mem();
     }
     size = adjust_aligned_allocation_size(align, size);
-    // On the fast path we've already called maybe_sample (foreign threads
-    // never sample, as their sampler is disabled, so calling it there is
-    // harmless).
-    bool should_sample = cpu_mem.definitely_sample(size);
-    void* ptr;
     if (size <= max_small_allocation && align <= page_size) {
         // Our small allocator only guarantees alignment for power-of-two
         // allocations which are not larger than a page.
-#ifdef SEASTAR_HEAPPROF
-        if (should_sample) {
-            ptr = allocate_from_sampled_small_pool<alignment_t::aligned>(size);
-        } else
-#endif
-        {
-            ptr = allocate_from_small_pool<alignment_t::aligned>(size);
-        }
-    } else {
-        ptr = allocate_large_aligned(align, size, should_sample);
-        ptr = maybe_system_fallback(ptr, align, size);
+        return finish_small_allocation(allocate_small_slowpath<alignment_t::aligned>(size), size);
     }
+    // Foreign threads never sample, as their sampler is disabled.
+    bool should_sample = cpu_mem.maybe_sample(size) && cpu_mem.definitely_sample(size);
+    auto ptr = allocate_large_aligned(align, size, should_sample);
+    ptr = maybe_system_fallback(ptr, align, size);
     return finish_allocation(ptr, size);
 }
 
@@ -1904,12 +1978,11 @@ void* allocate_aligned_slowpath(size_t align, size_t size) {
 [[gnu::always_inline]]
 inline void* allocate_aligned(size_t align, size_t size) {
     auto adjusted_size = adjust_aligned_allocation_size(align, size);
-    if (__builtin_expect(!cpu_mem.maybe_sample(adjusted_size)
-                && adjusted_size <= max_small_allocation && align <= page_size, true)) {
+    if (__builtin_expect(adjusted_size <= max_small_allocation && align <= page_size, true)) {
         // See the note in allocate() about why is_reactor_thread isn't checked
         // here.
         if (auto ptr = try_allocate_from_small_pool<alignment_t::aligned>(adjusted_size)) {
-            return finish_allocation(ptr, adjusted_size);
+            return finish_small_allocation(ptr, adjusted_size);
         }
     }
 
@@ -2097,8 +2170,29 @@ configure(std::vector<resource::memory> m, bool mbind,
 }
 
 statistics stats() {
-    return statistics{alloc_stats::get(alloc_stats::types::allocs), alloc_stats::get(alloc_stats::types::frees), alloc_stats::get(alloc_stats::types::cross_cpu_frees),
-        cpu_mem.nr_pages * page_size, cpu_mem.nr_free_pages * page_size, alloc_stats::get(alloc_stats::types::total_bytes_allocated), alloc_stats::get(alloc_stats::types::reclaims), alloc_stats::get(alloc_stats::types::large_allocs),
+    auto allocs = alloc_stats::get(alloc_stats::types::allocs);
+    auto frees = alloc_stats::get(alloc_stats::types::frees);
+    auto bytes_allocated = alloc_stats::get(alloc_stats::types::total_bytes_allocated);
+    if (is_reactor_thread) {
+        // Small pools charge the allocation stats for a whole batch when they
+        // refill their allocation list, and the free stats when their free list
+        // is drained. Take out the objects charged but not handed out yet, and
+        // add the ones freed but not charged yet.
+        auto adjust = [&] (const small_pool& sp) {
+            auto pending = sp.alloc_list_length();
+            allocs -= pending;
+            bytes_allocated -= uint64_t(pending) * sp.object_size();
+            frees += sp.free_list_length();
+        };
+        for (unsigned i = 0; i < cpu_mem.small_pools.nr_small_pools; i++) {
+            adjust(cpu_mem.small_pools[i]);
+#ifdef SEASTAR_HEAPPROF
+            adjust(cpu_mem.sampled_small_pools[i]);
+#endif
+        }
+    }
+    return statistics{allocs, frees, alloc_stats::get(alloc_stats::types::cross_cpu_frees),
+        cpu_mem.nr_pages * page_size, cpu_mem.nr_free_pages * page_size, bytes_allocated, alloc_stats::get(alloc_stats::types::reclaims), alloc_stats::get(alloc_stats::types::large_allocs),
         alloc_stats::get(alloc_stats::types::failed_allocs), alloc_stats::get(alloc_stats::types::fallback_allocs), alloc_stats::get(alloc_stats::types::foreign_mallocs), alloc_stats::get(alloc_stats::types::foreign_frees),
         alloc_stats::get(alloc_stats::types::foreign_cross_frees)};
 }
@@ -2248,7 +2342,7 @@ seastar::internal::log_buf::inserter_iterator do_dump_memory_diagnostics(seastar
         }
 
         // For the small pools, there are two types of free objects:
-        // Pool freelist objects are poitned to by sp._free and their count is sp._free_count
+        // Pool objects are on the allocation list (sp._alloc) or the free list (sp._free)
         // Span freelist objects are those removed from the pool freelist when that list
         // becomes too large: they are instead attached to the spans allocated to this
         // pool. To count this second category, we iterate over the spans below.
@@ -2260,7 +2354,7 @@ seastar::internal::log_buf::inserter_iterator do_dump_memory_diagnostics(seastar
             span_freelist_objs += capacity_in_objects - span.nr_small_alloc;
             front = span.link._next;
         }
-        const auto free_objs = sp._free_count + span_freelist_objs; // pool + span free objects
+        const auto free_objs = sp.alloc_list_length() + sp.free_list_length() + span_freelist_objs; // pool + span free objects
         const auto use_count = sp._pages_in_use * page_size / sp.object_size() - free_objs;
         auto memory = sp._pages_in_use * page_size;
         const auto unused = free_objs * sp.object_size();
