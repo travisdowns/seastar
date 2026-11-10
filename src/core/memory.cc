@@ -225,6 +225,15 @@ namespace memory {
 static allocation_site_ptr get_allocation_site();
 
 [[gnu::noinline]]
+#ifdef SEASTAR_ABORT_ON_ALLOCATION_FAILURE
+// Allocation failure always aborts, regardless of
+// set_abort_on_allocation_failure(), so allocation never returns null and the
+// compiler can drop the null checks and std::bad_alloc paths after it.
+#define SEASTAR_ALLOC_NONNULL [[gnu::returns_nonnull]]
+[[noreturn]]
+#else
+#define SEASTAR_ALLOC_NONNULL
+#endif
 static void on_allocation_failure(size_t size);
 
 static constexpr unsigned bits_for_cpu_id_and_memory = 44; // 3 reserved for memory area prefix, 47 total address space
@@ -1907,12 +1916,18 @@ static void * maybe_system_fallback(void *ptr, size_t align, size_t size) {
 
 // Kept out of line even when a profile marks it hot (it runs on every refill),
 // so the inlined fast path stays small.
-[[gnu::noinline]]
+[[gnu::noinline]] SEASTAR_ALLOC_NONNULL
 void *allocate_slowpath(size_t size) {
     if (!is_reactor_thread) {
         if (original_malloc_func) {
             alloc_stats::increment(alloc_stats::types::foreign_mallocs);
-            return original_malloc_func(size);
+            auto ptr = original_malloc_func(size);
+#ifdef SEASTAR_ABORT_ON_ALLOCATION_FAILURE
+            if (!ptr) {
+                on_allocation_failure(size);
+            }
+#endif
+            return ptr;
         }
 
         // original_malloc_func might be null for allocations before main
@@ -1992,12 +2007,18 @@ static inline size_t adjust_aligned_allocation_size(size_t align, size_t size) {
 
 // Kept out of line even when a profile marks it hot (it runs on every refill),
 // so the inlined fast path stays small.
-[[gnu::noinline]]
+[[gnu::noinline]] SEASTAR_ALLOC_NONNULL
 void* allocate_aligned_slowpath(size_t align, size_t size) {
     if (!is_reactor_thread) {
         if (original_aligned_alloc_func) {
             alloc_stats::increment(alloc_stats::types::foreign_mallocs);
-            return original_aligned_alloc_func(align, size);
+            auto ptr = original_aligned_alloc_func(align, size);
+#ifdef SEASTAR_ABORT_ON_ALLOCATION_FAILURE
+            if (!ptr) {
+                on_allocation_failure(size);
+            }
+#endif
+            return ptr;
         }
         // original_aligned_alloc_func might be null for allocations before main
         // in constructors before original_aligned_alloc_func ctor is called
@@ -2294,6 +2315,9 @@ void set_abort_on_allocation_failure(bool enabled) {
 }
 
 bool is_abort_on_allocation_failure() {
+#ifdef SEASTAR_ABORT_ON_ALLOCATION_FAILURE
+    return true;
+#endif
     return abort_on_allocation_failure;
 }
 
@@ -2515,8 +2539,12 @@ void maybe_dump_memory_diagnostics(size_t size, bool is_aborting) {
 void on_allocation_failure(size_t size) {
     alloc_stats::increment(alloc_stats::types::failed_allocs);
 
+#ifdef SEASTAR_ABORT_ON_ALLOCATION_FAILURE
+    constexpr bool will_abort = true;
+#else
     bool will_abort = !internal::abort_on_alloc_failure_suppressed
             && abort_on_allocation_failure.load(std::memory_order_relaxed);
+#endif
 
     maybe_dump_memory_diagnostics(size, will_abort);
 
