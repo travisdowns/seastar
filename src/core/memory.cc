@@ -485,6 +485,11 @@ public:
     inline void* allocate();
     inline void* try_allocate();
     void deallocate(void* object);
+    /// Pushes an object onto the free list. Returns true if that filled the
+    /// list, in which case the caller must call free_list_full().
+    inline bool push_free(void* object);
+    /// Called when a push fills the free list.
+    [[gnu::noinline]] void free_list_full() noexcept;
     unsigned object_size() const { return _object_size; }
     /// See _sampled_pool
     bool is_sampled_pool() const {
@@ -514,8 +519,6 @@ private:
     /// Moves the whole free list onto the (empty) allocation list, charging
     /// the free and allocation stats for its objects. Returns how many moved.
     unsigned move_free_to_alloc();
-    /// Called when a push fills the free list.
-    [[gnu::noinline]] void free_list_full() noexcept;
     /// Returns every object on the free list to its span.
     void release_free_list();
     /// Removes from the free list every object that does not belong to this
@@ -1602,15 +1605,35 @@ small_pool::try_allocate() {
     return __builtin_expect((bool)_alloc, true) ? pop_alloc() : nullptr;
 }
 
-void
-small_pool::deallocate(void* object) {
+bool
+small_pool::push_free(void* object) {
     auto o = reinterpret_cast<free_object*>(object);
     o->next = _free;
     _free = o;
-    if (__builtin_expect(--_free_room == 0, false)) {
+    return __builtin_expect(--_free_room == 0, false);
+}
+
+void
+small_pool::deallocate(void* object) {
+    if (push_free(object)) {
         free_list_full();
     }
 }
+
+/// free_list_full() for small pool I, as a function of no arguments, so that
+/// an inlined sized free only needs a call instruction on its slow path, rather
+/// than code to compute the pool's address.
+template <unsigned I>
+[[gnu::noinline, gnu::cold]]
+static void small_pool_full() noexcept {
+    cpu_mem.small_pools[I].free_list_full();
+}
+
+/// small_pool_full<I> for every pool. Indexing it with a constant folds to a
+/// direct call.
+static constexpr auto small_pool_full_fns = []<unsigned... I>(std::integer_sequence<unsigned, I...>) {
+    return std::array<void (*)() noexcept, sizeof...(I)>{&small_pool_full<I>...};
+}(std::make_integer_sequence<unsigned, small_pool_array<false>::nr_small_pools>{});
 
 unsigned
 small_pool::alloc_list_length() const {
@@ -2071,7 +2094,10 @@ inline void free(void* obj, S size = {}) {
         // looking at the pointer; the pool checks every object before reusing
         // it (small_pool::filter_free_list).
         if (__builtin_expect(obj != nullptr && size <= max_small_allocation, true)) {
-            cpu_mem.small_pools[small_pool::size_to_idx(std::max(size, sizeof(free_object)))].deallocate(obj);
+            auto idx = small_pool::size_to_idx(std::max(size, sizeof(free_object)));
+            if (cpu_mem.small_pools[idx].push_free(obj)) {
+                small_pool_full_fns[idx]();
+            }
             return;
         }
         if (!obj) {
