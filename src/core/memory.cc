@@ -2620,14 +2620,26 @@ size_t sampled_memory_profile(allocation_site* output, size_t size) {
 
 using namespace seastar::memory;
 
-extern "C"
-[[gnu::visibility("default")]]
-[[gnu::used]]
-void* malloc(size_t n) noexcept {
+[[gnu::noinline]]
+static void* malloc_ool(size_t n) noexcept {
     if (try_trigger_error_injector()) {
         return nullptr;
     }
     return allocate(n);
+}
+
+extern "C"
+[[gnu::visibility("default")]]
+[[gnu::used]]
+void* malloc(size_t n) noexcept {
+    // Inline the fast path only where the size is known at compile time.
+    if (__builtin_constant_p(n)) {
+        if (try_trigger_error_injector()) {
+            return nullptr;
+        }
+        return allocate(n);
+    }
+    return malloc_ool(n);
 }
 
 extern "C"
@@ -2641,6 +2653,7 @@ extern "C"
 void* __libc_malloc(size_t n) noexcept;
 
 extern "C"
+[[gnu::noinline]]
 [[gnu::visibility("default")]]
 [[gnu::used]]
 void free(void* ptr) {
@@ -2655,14 +2668,25 @@ extern "C"
 #endif
 void __libc_free(void* obj) noexcept;
 
-extern "C"
-[[gnu::visibility("default")]]
-[[gnu::used]]
-void free_sized(void* ptr, size_t size) {
+[[gnu::noinline]]
+static void free_sized_ool(void* ptr, size_t size) {
     seastar::memory::free(ptr, size);
 }
 
 extern "C"
+[[gnu::visibility("default")]]
+[[gnu::used]]
+void free_sized(void* ptr, size_t size) {
+    // Inline the fast path only where the size is known at compile time.
+    if (__builtin_constant_p(size)) {
+        seastar::memory::free(ptr, size);
+        return;
+    }
+    free_sized_ool(ptr, size);
+}
+
+extern "C"
+[[gnu::noinline]]
 [[gnu::visibility("default")]]
 [[gnu::used]]
 void free_aligned_sized(void* ptr, size_t alignment, size_t size) {
@@ -2670,6 +2694,7 @@ void free_aligned_sized(void* ptr, size_t alignment, size_t size) {
 }
 
 extern "C"
+[[gnu::noinline]]
 [[gnu::visibility("default")]]
 void* calloc(size_t nmemb, size_t size) {
     if (try_trigger_error_injector()) {
@@ -2696,6 +2721,7 @@ extern "C"
 void* __libc_calloc(size_t n, size_t m) noexcept;
 
 extern "C"
+[[gnu::noinline]]
 [[gnu::visibility("default")]]
 void* realloc(void* ptr, size_t size) {
     if (try_trigger_error_injector()) {
@@ -2753,6 +2779,7 @@ extern "C"
 void* __libc_realloc(void* obj, size_t size) noexcept;
 
 extern "C"
+[[gnu::noinline]]
 [[gnu::visibility("default")]]
 [[gnu::used]]
 #ifndef __clang__
@@ -2781,6 +2808,7 @@ extern "C"
 int __libc_posix_memalign(void** ptr, size_t align, size_t size) noexcept;
 
 extern "C"
+[[gnu::noinline]]
 [[gnu::visibility("default")]]
 [[gnu::malloc]]
 #if defined(__GLIBC__)
@@ -2800,6 +2828,7 @@ void* memalign(size_t align, size_t size) noexcept {
 }
 
 extern "C"
+[[gnu::noinline]]
 [[gnu::visibility("default")]]
 void *aligned_alloc(size_t align, size_t size) noexcept {
     if (try_trigger_error_injector()) {
@@ -2823,6 +2852,7 @@ extern "C"
 void* __libc_memalign(size_t align, size_t size) noexcept;
 
 extern "C"
+[[gnu::noinline]]
 [[gnu::visibility("default")]]
 void cfree(void* obj) noexcept {
     return ::free(obj);
@@ -2834,6 +2864,7 @@ extern "C"
 void __libc_cfree(void* obj) noexcept;
 
 extern "C"
+[[gnu::noinline]]
 [[gnu::visibility("default")]]
 size_t malloc_usable_size(void* obj) {
     if (!is_seastar_memory(obj)) {
@@ -2843,6 +2874,7 @@ size_t malloc_usable_size(void* obj) {
 }
 
 extern "C"
+[[gnu::noinline]]
 [[gnu::visibility("default")]]
 int malloc_trim(size_t pad) {
     if (!is_reactor_thread) {
@@ -2859,9 +2891,25 @@ void* throw_if_null(void* ptr) {
     return ptr;
 }
 
+[[gnu::noinline]]
+static void* new_ool(size_t size) {
+    trigger_error_injector();
+    return throw_if_null(allocate(size));
+}
+
 extern "C++"
 [[gnu::visibility("default")]]
 void* operator new(size_t size) {
+    // Inline the fast path only where the size is known at compile time.
+    if (__builtin_constant_p(size)) {
+        trigger_error_injector();
+        return throw_if_null(allocate(size));
+    }
+    return new_ool(size);
+}
+
+[[gnu::noinline]]
+static void* new_array_ool(size_t size) {
     trigger_error_injector();
     return throw_if_null(allocate(size));
 }
@@ -2869,37 +2917,62 @@ void* operator new(size_t size) {
 extern "C++"
 [[gnu::visibility("default")]]
 void* operator new[](size_t size) {
-    trigger_error_injector();
-    return throw_if_null(allocate(size));
+    // Inline the fast path only where the size is known at compile time.
+    if (__builtin_constant_p(size)) {
+        trigger_error_injector();
+        return throw_if_null(allocate(size));
+    }
+    return new_array_ool(size);
 }
 
 extern "C++"
+[[gnu::noinline]]
 [[gnu::visibility("default")]]
 void operator delete(void* ptr) noexcept {
     seastar::memory::free(ptr);
 }
 
 extern "C++"
+[[gnu::noinline]]
 [[gnu::visibility("default")]]
 void operator delete[](void* ptr) noexcept {
     seastar::memory::free(ptr);
 }
 
+[[gnu::noinline]]
+static void delete_sized_ool(void* ptr, size_t size) noexcept {
+    seastar::memory::free(ptr, size);
+}
+
 extern "C++"
 [[gnu::visibility("default")]]
 void operator delete(void* ptr, size_t size) noexcept {
+    // Inline the fast path only where the size is known at compile time.
+    if (__builtin_constant_p(size)) {
+        seastar::memory::free(ptr, size);
+        return;
+    }
+    delete_sized_ool(ptr, size);
+}
+
+[[gnu::noinline]]
+static void delete_array_sized_ool(void* ptr, size_t size) noexcept {
     seastar::memory::free(ptr, size);
 }
 
 extern "C++"
 [[gnu::visibility("default")]]
 void operator delete[](void* ptr, size_t size) noexcept {
-    seastar::memory::free(ptr, size);
+    // Inline the fast path only where the size is known at compile time.
+    if (__builtin_constant_p(size)) {
+        seastar::memory::free(ptr, size);
+        return;
+    }
+    delete_array_sized_ool(ptr, size);
 }
 
-extern "C++"
-[[gnu::visibility("default")]]
-void* operator new(size_t size, std::nothrow_t) noexcept {
+[[gnu::noinline]]
+static void* new_nothrow_ool(size_t size, std::nothrow_t) noexcept {
     if (try_trigger_error_injector()) {
         return nullptr;
     }
@@ -2908,35 +2981,80 @@ void* operator new(size_t size, std::nothrow_t) noexcept {
 
 extern "C++"
 [[gnu::visibility("default")]]
-void* operator new[](size_t size, std::nothrow_t) noexcept {
+void* operator new(size_t size, std::nothrow_t) noexcept {
+    // Inline the fast path only where the size is known at compile time.
+    if (__builtin_constant_p(size)) {
+        if (try_trigger_error_injector()) {
+            return nullptr;
+        }
+        return allocate(size);
+    }
+    return new_nothrow_ool(size, std::nothrow);
+}
+
+[[gnu::noinline]]
+static void* new_array_nothrow_ool(size_t size, std::nothrow_t) noexcept {
     return allocate(size);
 }
 
 extern "C++"
+[[gnu::visibility("default")]]
+void* operator new[](size_t size, std::nothrow_t) noexcept {
+    // Inline the fast path only where the size is known at compile time.
+    if (__builtin_constant_p(size)) {
+        return allocate(size);
+    }
+    return new_array_nothrow_ool(size, std::nothrow);
+}
+
+extern "C++"
+[[gnu::noinline]]
 [[gnu::visibility("default")]]
 void operator delete(void* ptr, std::nothrow_t) noexcept {
     seastar::memory::free(ptr);
 }
 
 extern "C++"
+[[gnu::noinline]]
 [[gnu::visibility("default")]]
 void operator delete[](void* ptr, std::nothrow_t) noexcept {
     seastar::memory::free(ptr);
 }
 
+[[gnu::noinline]]
+static void delete_sized_nothrow_ool(void* ptr, size_t size, std::nothrow_t) noexcept {
+    seastar::memory::free(ptr, size);
+}
+
 extern "C++"
 [[gnu::visibility("default")]]
 void operator delete(void* ptr, size_t size, std::nothrow_t) noexcept {
+    // Inline the fast path only where the size is known at compile time.
+    if (__builtin_constant_p(size)) {
+        seastar::memory::free(ptr, size);
+        return;
+    }
+    delete_sized_nothrow_ool(ptr, size, std::nothrow);
+}
+
+[[gnu::noinline]]
+static void delete_array_sized_nothrow_ool(void* ptr, size_t size, std::nothrow_t) noexcept {
     seastar::memory::free(ptr, size);
 }
 
 extern "C++"
 [[gnu::visibility("default")]]
 void operator delete[](void* ptr, size_t size, std::nothrow_t) noexcept {
-    seastar::memory::free(ptr, size);
+    // Inline the fast path only where the size is known at compile time.
+    if (__builtin_constant_p(size)) {
+        seastar::memory::free(ptr, size);
+        return;
+    }
+    delete_array_sized_nothrow_ool(ptr, size, std::nothrow);
 }
 
 extern "C++"
+[[gnu::noinline]]
 [[gnu::visibility("default")]]
 void* operator new(size_t size, std::align_val_t a) {
     trigger_error_injector();
@@ -2945,6 +3063,7 @@ void* operator new(size_t size, std::align_val_t a) {
 }
 
 extern "C++"
+[[gnu::noinline]]
 [[gnu::visibility("default")]]
 void* operator new[](size_t size, std::align_val_t a) {
     trigger_error_injector();
@@ -2953,6 +3072,7 @@ void* operator new[](size_t size, std::align_val_t a) {
 }
 
 extern "C++"
+[[gnu::noinline]]
 [[gnu::visibility("default")]]
 void* operator new(size_t size, std::align_val_t a, const std::nothrow_t&) noexcept {
     if (try_trigger_error_injector()) {
@@ -2962,6 +3082,7 @@ void* operator new(size_t size, std::align_val_t a, const std::nothrow_t&) noexc
 }
 
 extern "C++"
+[[gnu::noinline]]
 [[gnu::visibility("default")]]
 void* operator new[](size_t size, std::align_val_t a, const std::nothrow_t&) noexcept {
     if (try_trigger_error_injector()) {
@@ -2971,18 +3092,21 @@ void* operator new[](size_t size, std::align_val_t a, const std::nothrow_t&) noe
 }
 
 extern "C++"
+[[gnu::noinline]]
 [[gnu::visibility("default")]]
 void operator delete(void* ptr, std::align_val_t a) noexcept {
     seastar::memory::free(ptr);
 }
 
 extern "C++"
+[[gnu::noinline]]
 [[gnu::visibility("default")]]
 void operator delete[](void* ptr, std::align_val_t a) noexcept {
     seastar::memory::free(ptr);
 }
 
 extern "C++"
+[[gnu::noinline]]
 [[gnu::visibility("default")]]
 void operator delete(void* ptr, size_t size, std::align_val_t a) noexcept {
     if (ptr) {
@@ -2991,6 +3115,7 @@ void operator delete(void* ptr, size_t size, std::align_val_t a) noexcept {
 }
 
 extern "C++"
+[[gnu::noinline]]
 [[gnu::visibility("default")]]
 void operator delete[](void* ptr, size_t size, std::align_val_t a) noexcept {
     if (ptr) {
@@ -2999,12 +3124,14 @@ void operator delete[](void* ptr, size_t size, std::align_val_t a) noexcept {
 }
 
 extern "C++"
+[[gnu::noinline]]
 [[gnu::visibility("default")]]
 void operator delete(void* ptr, std::align_val_t a, const std::nothrow_t&) noexcept {
     seastar::memory::free(ptr);
 }
 
 extern "C++"
+[[gnu::noinline]]
 [[gnu::visibility("default")]]
 void operator delete[](void* ptr, std::align_val_t a, const std::nothrow_t&) noexcept {
     seastar::memory::free(ptr);
@@ -3162,6 +3289,7 @@ void free_sized(void* ptr, size_t size) {
 }
 
 extern "C"
+[[gnu::noinline]]
 [[gnu::visibility("default")]]
 [[gnu::used]]
 void free_aligned_sized(void* ptr, size_t alignment, size_t size) {
