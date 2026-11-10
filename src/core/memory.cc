@@ -443,11 +443,13 @@ class small_pool {
     // when it was refilled, so the fast path keeps no counts.
     free_object* _alloc = nullptr;
     // Freed objects. deallocate() pushes onto this list, which holds at most
-    // _free_cap objects; when it overflows, it is moved to the allocation list
+    // _free_cap objects; when it is full, it is moved to the allocation list
     // or returned to its spans, and the free stats are charged then.
     free_object* _free = nullptr;
-    // Pushes left before the free list overflows (it overflows at -1).
-    long _free_room;
+    // Pushes left before the free list is full. Counting down to zero (rather
+    // than testing for a negative count) compiles to a single decrement of
+    // memory and a branch on x86.
+    unsigned long _free_room;
     unsigned _object_size;
     span_sizes _span_sizes;
     unsigned _free_cap;
@@ -497,7 +499,7 @@ private:
     /// Moves the whole free list onto the (empty) allocation list, charging
     /// the free and allocation stats for its objects. Returns how many moved.
     unsigned move_free_to_alloc();
-    /// Called when a push overflows the free list.
+    /// Called when a push fills the free list.
     [[gnu::noinline]] void free_list_full();
     /// Returns every object on the free list to its span.
     void release_free_list();
@@ -1581,7 +1583,7 @@ small_pool::deallocate(void* object) {
     auto o = reinterpret_cast<free_object*>(object);
     o->next = _free;
     _free = o;
-    if (__builtin_expect(--_free_room < 0, false)) {
+    if (__builtin_expect(--_free_room == 0, false)) {
         free_list_full();
     }
 }
