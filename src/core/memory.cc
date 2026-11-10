@@ -1620,20 +1620,14 @@ small_pool::deallocate(void* object) {
     }
 }
 
-/// free_list_full() for small pool I, as a function of no arguments, so that
-/// an inlined sized free only needs a call instruction on its slow path, rather
-/// than code to compute the pool's address.
-template <unsigned I>
+/// free_list_full() for the small pool with index idx, as a free function. An
+/// inlined sized free passes the size class, a constant where the size is, so its
+/// slow path is an immediate load and a call, with nothing to compute the pool's
+/// address from.
 [[gnu::noinline, gnu::cold]]
-static void small_pool_full() noexcept {
-    cpu_mem.small_pools[I].free_list_full();
+static void small_pool_full(unsigned idx) noexcept {
+    cpu_mem.small_pools[idx].free_list_full();
 }
-
-/// small_pool_full<I> for every pool. Indexing it with a constant folds to a
-/// direct call.
-static constexpr auto small_pool_full_fns = []<unsigned... I>(std::integer_sequence<unsigned, I...>) {
-    return std::array<void (*)() noexcept, sizeof...(I)>{&small_pool_full<I>...};
-}(std::make_integer_sequence<unsigned, small_pool_array<false>::nr_small_pools>{});
 
 unsigned
 small_pool::alloc_list_length() const {
@@ -2096,7 +2090,7 @@ inline void free(void* obj, S size = {}) {
         if (__builtin_expect(obj != nullptr && size <= max_small_allocation, true)) {
             auto idx = small_pool::size_to_idx(std::max(size, sizeof(free_object)));
             if (cpu_mem.small_pools[idx].push_free(obj)) {
-                small_pool_full_fns[idx]();
+                small_pool_full(idx);
             }
             return;
         }
