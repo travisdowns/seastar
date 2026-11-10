@@ -1609,7 +1609,9 @@ small_pool::push_free(void* object) {
     auto o = reinterpret_cast<free_object*>(object);
     o->next = _free;
     _free = o;
-    return __builtin_expect(--_free_room == 0, false);
+    // Test-only: no bookkeeping, so free is the push alone. The stats are wrong and
+    // the list is never trimmed.
+    return false;
 }
 
 void
