@@ -2065,7 +2065,7 @@ inline void* try_allocate_small_class(size_t pool_offset) {
 /// allocate_slowpath() for the size class at pool_offset. Out of line, so
 /// that callers that know the size class do not compute a size for it.
 [[gnu::noinline, gnu::cold]] SEASTAR_ALLOC_NONNULL
-static void* allocate_class_slowpath(size_t pool_offset) {
+static void* allocate_class_slowpath(size_t pool_offset) noexcept {
     return allocate_slowpath(small_pool::class_size(offset_class(pool_offset)));
 }
 
