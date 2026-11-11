@@ -472,6 +472,12 @@ public:
     inline void* allocate();
     inline void* try_allocate();
     void deallocate(void* object);
+    /// Pushes an object onto the free list. Returns true when the list is full,
+    /// in which case the caller must trim it, with trim_class().
+    inline bool push_free(void* object) noexcept;
+    /// trim_free_list() for the pool with size class idx, out of line and cold,
+    /// so that a free which knows the size class calls it with an immediate.
+    [[gnu::noinline, gnu::cold]] static void trim_class(unsigned idx) noexcept;
     unsigned object_size() const { return _object_size; }
     unsigned free_count() const { return _max_free - _free_room; }
     /// See _sampled_pool
@@ -489,7 +495,7 @@ public:
 private:
     inline void* pop_free();
     [[gnu::noinline]] void* add_more_objects();
-    void trim_free_list();
+    void trim_free_list() noexcept;
     friend seastar::internal::log_buf::inserter_iterator do_dump_memory_diagnostics(seastar::internal::log_buf::inserter_iterator);
 };
 
@@ -1562,14 +1568,24 @@ small_pool::try_allocate() {
     return __builtin_expect((bool)_free, true) ? pop_free() : nullptr;
 }
 
-void
-small_pool::deallocate(void* object) {
+bool
+small_pool::push_free(void* object) noexcept {
     auto o = reinterpret_cast<free_object*>(object);
     o->next = _free;
     _free = o;
-    if (--_free_room == 0) {
+    return __builtin_expect(--_free_room == 0, false);
+}
+
+void
+small_pool::deallocate(void* object) {
+    if (push_free(object)) {
         trim_free_list();
     }
+}
+
+void
+small_pool::trim_class(unsigned idx) noexcept {
+    cpu_mem.small_pools[idx].trim_free_list();
 }
 
 void*
@@ -1619,7 +1635,7 @@ small_pool::add_more_objects() {
 }
 
 void
-small_pool::trim_free_list() {
+small_pool::trim_free_list() noexcept {
     auto goal = (_min_free + _max_free) / 2;
     while (_free && free_count() > goal) {
         auto obj = _free;
