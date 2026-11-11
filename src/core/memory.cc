@@ -1526,7 +1526,12 @@ void cpu_pages::set_min_free_pages(size_t pages) {
  */
 void *
 small_pool::pop_free() {
-    auto obj = _array[--_free_count];
+    auto top = _array + --_free_count;
+    // Start fetching the object the next pop will hand out, which is usually
+    // written soon after. When this pop empties the array, top[-1] is the
+    // pointer to itself that init_array() put below _array[0].
+    __builtin_prefetch(top[-1], 1);
+    auto obj = *top;
     [[assume(obj != nullptr)]];
     return obj;
 }
