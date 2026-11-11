@@ -1526,7 +1526,9 @@ void cpu_pages::set_min_free_pages(size_t pages) {
  */
 void *
 small_pool::pop_free() {
-    return _array[--_free_count];
+    auto obj = _array[--_free_count];
+    [[assume(obj != nullptr)]];
+    return obj;
 }
 
 // Should not throw in case of running out of memory to avoid infinite recursion,
