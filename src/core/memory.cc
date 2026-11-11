@@ -507,6 +507,10 @@ public:
     bool objects_page_aligned() const { return is_page_aligned(_object_size); }
     static constexpr unsigned size_to_idx(unsigned size);
     static constexpr unsigned idx_to_size(unsigned idx);
+    /// The largest size in size class idx. Unlike idx_to_size(), which can
+    /// round the object size up into a later class, size_to_idx() maps it back
+    /// to idx.
+    static constexpr unsigned class_size(unsigned idx);
     allocation_site_ptr& alloc_site_holder(void* ptr);
     /// Refills the (empty) list from the spans, after charging the stats for the
     /// allocations and frees since the last bookkeeping. Returns the number of
@@ -551,6 +555,13 @@ constexpr unsigned
 small_pool::size_to_idx(unsigned size) {
     return ((log2floor(size) << idx_frac_bits) - ((1 << idx_frac_bits) - 1))
             + ((size - 1) >> (log2floor(size) - idx_frac_bits));
+}
+
+constexpr unsigned
+small_pool::class_size(unsigned idx) {
+    return (((1 << idx_frac_bits) | (idx & ((1 << idx_frac_bits) - 1)))
+            << (idx >> idx_frac_bits))
+                >> idx_frac_bits;
 }
 
 constexpr small_pool::small_pool(unsigned object_size, bool is_sampled) noexcept
@@ -643,6 +654,17 @@ static_assert(object_size_with_alloc_site(max_small_allocation - sizeof(allocati
 // if not, do_test_fallback_alloc needs to be updated to use a size
 // larger than the small alloc threshold
 static_assert(max_small_allocation < 32 * 1024);
+
+static constexpr bool check_class_sizes() {
+    for (unsigned idx = small_pool::size_to_idx(sizeof(free_object)); idx < small_pool_array<false>::nr_small_pools; ++idx) {
+        if (small_pool::size_to_idx(small_pool::class_size(idx)) != idx
+                || small_pool::class_size(idx) > small_pool::idx_to_size(idx)) {
+            return false;
+        }
+    }
+    return true;
+}
+static_assert(check_class_sizes());
 
 struct cross_cpu_free_item {
     cross_cpu_free_item* next;
@@ -1984,9 +2006,9 @@ void *allocate_slowpath(size_t size) {
 /// so that the body of each of those functions will contain the full fast path
 /// fully inlined, and all of these variations will share the allocate_slowpath
 /// fallback, which is not inlined.
+/// allocate() for a size of at least sizeof(free_object).
 [[gnu::always_inline]]
-inline void* allocate(size_t size) {
-    size = std::max(size, sizeof(free_object));
+inline void* allocate_at_least_min(size_t size) {
     if (__builtin_expect(size <= max_small_allocation, true)) {
         // Note we don't check is_reactor_thread here: a thread which doesn't
         // use the seastar allocator has empty small pool allocation lists, so
@@ -2000,6 +2022,20 @@ inline void* allocate(size_t size) {
     }
 
     return allocate_slowpath(size);
+}
+
+[[gnu::always_inline]]
+inline void* allocate(size_t size) {
+    return allocate_at_least_min(std::max(size, sizeof(free_object)));
+}
+
+/// allocate() for a small size whose size class is known.
+[[gnu::always_inline]]
+inline void* allocate_small_class(unsigned idx) {
+    if (auto ptr = cpu_mem.small_pools[idx].try_allocate()) {
+        return finish_small_allocation(ptr, small_pool::class_size(idx));
+    }
+    return allocate_slowpath(small_pool::class_size(idx));
 }
 
 // Adjust the size of an aligned allocation to something our small pools can
@@ -2071,24 +2107,45 @@ inline void* allocate_aligned(size_t align, size_t size) {
 ///
 /// The S template object allows us to handle both sized and unsized allocations
 /// in the same code path.
+#ifndef SEASTAR_HEAPPROF
+/// Sized free without heap profiling. With the size known, a local pointer goes
+/// straight onto the pool for that size, with no page lookup. The local check
+/// also rejects null and pointers from other shards, which free_slowpath()
+/// handles. (With heap profiling the page lookup is needed to find sampled
+/// objects, so sized frees take the unsized path.) at_least_min says the size
+/// is known to be at least sizeof(free_object).
+template <bool at_least_min>
+[[gnu::always_inline]]
+inline void free_sized_fast(void* obj, size_t size) {
+    if (__builtin_expect(cpu_pages::is_local_pointer(obj) && size <= max_small_allocation, true)) {
+        auto idx = small_pool::size_to_idx(at_least_min ? size : std::max(size, sizeof(free_object)));
+        if (cpu_mem.small_pools[idx].push_free(obj)) {
+            small_pool_bookkeeping(idx);
+        }
+        return;
+    }
+    free_slowpath(obj, size);
+}
+
+/// Sized free without heap profiling, for a small size whose size class is known.
+[[gnu::always_inline]]
+inline void free_small_class(void* obj, unsigned idx) {
+    if (__builtin_expect(cpu_pages::is_local_pointer(obj), true)) {
+        if (cpu_mem.small_pools[idx].push_free(obj)) {
+            small_pool_bookkeeping(idx);
+        }
+        return;
+    }
+    free_slowpath(obj, no_size{});
+}
+#endif
+
 template <typename S = no_size>
 [[gnu::always_inline]]
 inline void free(void* obj, S size = {}) {
 #ifndef SEASTAR_HEAPPROF
     if constexpr (std::is_same_v<S, size_t>) {
-        // With the size known, a local pointer goes straight onto the pool for
-        // that size, with no page lookup. The local check also rejects null and
-        // pointers from other shards, which free_slowpath() handles. (With heap
-        // profiling the page lookup is needed to find sampled objects, so sized
-        // frees take the regular path below.)
-        if (__builtin_expect(cpu_pages::is_local_pointer(obj) && size <= max_small_allocation, true)) {
-            auto idx = small_pool::size_to_idx(std::max(size, sizeof(free_object)));
-            if (cpu_mem.small_pools[idx].push_free(obj)) {
-                small_pool_bookkeeping(idx);
-            }
-            return;
-        }
-        free_slowpath(obj, size);
+        free_sized_fast<false>(obj, size);
         return;
     }
 #endif
@@ -2606,6 +2663,43 @@ size_t sampled_memory_profile(allocation_site* output, size_t size) {
 
 using namespace seastar::memory;
 
+// The sized entry points are inlined into their callers and only pick which
+// out-of-line function to call: with the size known at compile time, one that
+// takes the size class; with the size known to be at least
+// sizeof(free_object), one that skips rounding it up to that; otherwise the
+// general one.
+
+template <typename Class, typename AtLeastMin, typename General>
+[[gnu::always_inline]]
+static inline auto dispatch_size(size_t size, Class by_class, AtLeastMin at_least_min, General general) {
+    if (__builtin_constant_p(size)) {
+        if (size <= max_small_allocation) {
+            return by_class(small_pool::size_to_idx(std::max(size, sizeof(free_object))));
+        }
+        return general(size);
+    }
+    if (__builtin_constant_p(size >= sizeof(free_object)) && size >= sizeof(free_object)) {
+        return at_least_min(size);
+    }
+    return general(size);
+}
+
+[[gnu::noinline]]
+static void* malloc_class(unsigned idx) noexcept {
+    if (try_trigger_error_injector()) {
+        return nullptr;
+    }
+    return allocate_small_class(idx);
+}
+
+[[gnu::noinline]]
+static void* malloc_at_least_min(size_t n) noexcept {
+    if (try_trigger_error_injector()) {
+        return nullptr;
+    }
+    return allocate_at_least_min(n);
+}
+
 [[gnu::noinline]]
 static void* malloc_ool(size_t n) noexcept {
     if (try_trigger_error_injector()) {
@@ -2614,18 +2708,46 @@ static void* malloc_ool(size_t n) noexcept {
     return allocate(n);
 }
 
+[[gnu::always_inline]]
+static inline void* dispatch_malloc(size_t n) noexcept {
+    return dispatch_size(n, malloc_class, malloc_at_least_min, malloc_ool);
+}
+
+[[gnu::noinline]]
+static void free_sized_ool(void* ptr, size_t size) noexcept {
+    seastar::memory::free(ptr, size);
+}
+
+#ifndef SEASTAR_HEAPPROF
+[[gnu::noinline]]
+static void free_class(void* ptr, unsigned idx) noexcept {
+    free_small_class(ptr, idx);
+}
+
+[[gnu::noinline]]
+static void free_sized_at_least_min(void* ptr, size_t size) noexcept {
+    free_sized_fast<true>(ptr, size);
+}
+#endif
+
+[[gnu::always_inline]]
+static inline void dispatch_free_sized(void* ptr, size_t size) noexcept {
+#ifndef SEASTAR_HEAPPROF
+    dispatch_size(size,
+        [ptr] (unsigned idx) { free_class(ptr, idx); },
+        [ptr] (size_t s) { free_sized_at_least_min(ptr, s); },
+        [ptr] (size_t s) { free_sized_ool(ptr, s); });
+#else
+    free_sized_ool(ptr, size);
+#endif
+}
+
 extern "C"
+[[gnu::always_inline]]
 [[gnu::visibility("default")]]
 [[gnu::used]]
 void* malloc(size_t n) noexcept {
-    // Inline the fast path only where the size is known at compile time.
-    if (__builtin_constant_p(n)) {
-        if (try_trigger_error_injector()) {
-            return nullptr;
-        }
-        return allocate(n);
-    }
-    return malloc_ool(n);
+    return dispatch_malloc(n);
 }
 
 extern "C"
@@ -2654,21 +2776,12 @@ extern "C"
 #endif
 void __libc_free(void* obj) noexcept;
 
-[[gnu::noinline]]
-static void free_sized_ool(void* ptr, size_t size) {
-    seastar::memory::free(ptr, size);
-}
-
 extern "C"
+[[gnu::always_inline]]
 [[gnu::visibility("default")]]
 [[gnu::used]]
 void free_sized(void* ptr, size_t size) {
-    // Inline the fast path only where the size is known at compile time.
-    if (__builtin_constant_p(size)) {
-        seastar::memory::free(ptr, size);
-        return;
-    }
-    free_sized_ool(ptr, size);
+    dispatch_free_sized(ptr, size);
 }
 
 extern "C"
@@ -2878,37 +2991,35 @@ void* throw_if_null(void* ptr) {
 }
 
 [[gnu::noinline]]
+static void* new_class(unsigned idx) {
+    trigger_error_injector();
+    return throw_if_null(allocate_small_class(idx));
+}
+
+[[gnu::noinline]]
+static void* new_at_least_min(size_t size) {
+    trigger_error_injector();
+    return throw_if_null(allocate_at_least_min(size));
+}
+
+[[gnu::noinline]]
 static void* new_ool(size_t size) {
     trigger_error_injector();
     return throw_if_null(allocate(size));
 }
 
 extern "C++"
+[[gnu::always_inline]]
 [[gnu::visibility("default")]]
 void* operator new(size_t size) {
-    // Inline the fast path only where the size is known at compile time.
-    if (__builtin_constant_p(size)) {
-        trigger_error_injector();
-        return throw_if_null(allocate(size));
-    }
-    return new_ool(size);
-}
-
-[[gnu::noinline]]
-static void* new_array_ool(size_t size) {
-    trigger_error_injector();
-    return throw_if_null(allocate(size));
+    return dispatch_size(size, new_class, new_at_least_min, new_ool);
 }
 
 extern "C++"
+[[gnu::always_inline]]
 [[gnu::visibility("default")]]
 void* operator new[](size_t size) {
-    // Inline the fast path only where the size is known at compile time.
-    if (__builtin_constant_p(size)) {
-        trigger_error_injector();
-        return throw_if_null(allocate(size));
-    }
-    return new_array_ool(size);
+    return dispatch_size(size, new_class, new_at_least_min, new_ool);
 }
 
 extern "C++"
@@ -2925,72 +3036,32 @@ void operator delete[](void* ptr) noexcept {
     seastar::memory::free(ptr);
 }
 
-[[gnu::noinline]]
-static void delete_sized_ool(void* ptr, size_t size) noexcept {
-    seastar::memory::free(ptr, size);
-}
-
 extern "C++"
+[[gnu::always_inline]]
 [[gnu::visibility("default")]]
 void operator delete(void* ptr, size_t size) noexcept {
-    // Inline the fast path only where the size is known at compile time.
-    if (__builtin_constant_p(size)) {
-        seastar::memory::free(ptr, size);
-        return;
-    }
-    delete_sized_ool(ptr, size);
-}
-
-[[gnu::noinline]]
-static void delete_array_sized_ool(void* ptr, size_t size) noexcept {
-    seastar::memory::free(ptr, size);
+    dispatch_free_sized(ptr, size);
 }
 
 extern "C++"
+[[gnu::always_inline]]
 [[gnu::visibility("default")]]
 void operator delete[](void* ptr, size_t size) noexcept {
-    // Inline the fast path only where the size is known at compile time.
-    if (__builtin_constant_p(size)) {
-        seastar::memory::free(ptr, size);
-        return;
-    }
-    delete_array_sized_ool(ptr, size);
-}
-
-[[gnu::noinline]]
-static void* new_nothrow_ool(size_t size, std::nothrow_t) noexcept {
-    if (try_trigger_error_injector()) {
-        return nullptr;
-    }
-    return allocate(size);
+    dispatch_free_sized(ptr, size);
 }
 
 extern "C++"
+[[gnu::always_inline]]
 [[gnu::visibility("default")]]
 void* operator new(size_t size, std::nothrow_t) noexcept {
-    // Inline the fast path only where the size is known at compile time.
-    if (__builtin_constant_p(size)) {
-        if (try_trigger_error_injector()) {
-            return nullptr;
-        }
-        return allocate(size);
-    }
-    return new_nothrow_ool(size, std::nothrow);
-}
-
-[[gnu::noinline]]
-static void* new_array_nothrow_ool(size_t size, std::nothrow_t) noexcept {
-    return allocate(size);
+    return dispatch_malloc(size);
 }
 
 extern "C++"
+[[gnu::always_inline]]
 [[gnu::visibility("default")]]
 void* operator new[](size_t size, std::nothrow_t) noexcept {
-    // Inline the fast path only where the size is known at compile time.
-    if (__builtin_constant_p(size)) {
-        return allocate(size);
-    }
-    return new_array_nothrow_ool(size, std::nothrow);
+    return dispatch_malloc(size);
 }
 
 extern "C++"
@@ -3007,36 +3078,18 @@ void operator delete[](void* ptr, std::nothrow_t) noexcept {
     seastar::memory::free(ptr);
 }
 
-[[gnu::noinline]]
-static void delete_sized_nothrow_ool(void* ptr, size_t size, std::nothrow_t) noexcept {
-    seastar::memory::free(ptr, size);
-}
-
 extern "C++"
+[[gnu::always_inline]]
 [[gnu::visibility("default")]]
 void operator delete(void* ptr, size_t size, std::nothrow_t) noexcept {
-    // Inline the fast path only where the size is known at compile time.
-    if (__builtin_constant_p(size)) {
-        seastar::memory::free(ptr, size);
-        return;
-    }
-    delete_sized_nothrow_ool(ptr, size, std::nothrow);
-}
-
-[[gnu::noinline]]
-static void delete_array_sized_nothrow_ool(void* ptr, size_t size, std::nothrow_t) noexcept {
-    seastar::memory::free(ptr, size);
+    dispatch_free_sized(ptr, size);
 }
 
 extern "C++"
+[[gnu::always_inline]]
 [[gnu::visibility("default")]]
 void operator delete[](void* ptr, size_t size, std::nothrow_t) noexcept {
-    // Inline the fast path only where the size is known at compile time.
-    if (__builtin_constant_p(size)) {
-        seastar::memory::free(ptr, size);
-        return;
-    }
-    delete_array_sized_nothrow_ool(ptr, size, std::nothrow);
+    dispatch_free_sized(ptr, size);
 }
 
 extern "C++"
