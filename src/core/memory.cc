@@ -450,7 +450,9 @@ class small_pool {
     free_object* _free = nullptr;
     unsigned _object_size;
     span_sizes _span_sizes;
-    unsigned _free_count = 0;
+    // Room left on the free list before it is trimmed: _max_free less the
+    // objects on it.
+    unsigned _free_room = 0;
     unsigned _min_free;
     unsigned _max_free;
     unsigned _pages_in_use = 0;
@@ -471,6 +473,7 @@ public:
     inline void* try_allocate();
     void deallocate(void* object);
     unsigned object_size() const { return _object_size; }
+    unsigned free_count() const { return _max_free - _free_room; }
     /// See _sampled_pool
     bool is_sampled_pool() const {
 #ifdef SEASTAR_HEAPPROF
@@ -550,6 +553,7 @@ constexpr small_pool::small_pool(unsigned object_size, bool is_sampled) noexcept
 
     _max_free = std::max<unsigned>(100, span_bytes() * 2 / _object_size);
     _min_free = _max_free / 2;
+    _free_room = _max_free;
     _free = nullptr;
 }
 
@@ -1533,7 +1537,7 @@ void *
 small_pool::pop_free() {
     auto* obj = _free;
     _free = _free->next;
-    --_free_count;
+    ++_free_room;
     return obj;
 }
 
@@ -1563,8 +1567,7 @@ small_pool::deallocate(void* object) {
     auto o = reinterpret_cast<free_object*>(object);
     o->next = _free;
     _free = o;
-    ++_free_count;
-    if (_free_count >= _max_free) {
+    if (--_free_room == 0) {
         trim_free_list();
     }
 }
@@ -1572,7 +1575,7 @@ small_pool::deallocate(void* object) {
 void*
 small_pool::add_more_objects() {
     auto goal = (_min_free + _max_free) / 2;
-    while (!_span_list.empty() && _free_count < goal) {
+    while (!_span_list.empty() && free_count() < goal) {
         page& span = _span_list.front(cpu_mem.pages);
         _span_list.pop_front(cpu_mem.pages);
         while (span.freelist) {
@@ -1580,11 +1583,11 @@ small_pool::add_more_objects() {
             span.freelist = span.freelist->next;
             obj->next = _free;
             _free = obj;
-            ++_free_count;
+            --_free_room;
             ++span.nr_small_alloc;
         }
     }
-    while (_free_count < goal) {
+    while (free_count() < goal) {
         auto span_size = _span_sizes.preferred;
         auto data = reinterpret_cast<char*>(cpu_mem.allocate_large(span_size, false));
         if (!data) {
@@ -1607,7 +1610,7 @@ small_pool::add_more_objects() {
             auto h = reinterpret_cast<free_object*>(data + offset);
             h->next = _free;
             _free = h;
-            ++_free_count;
+            --_free_room;
             ++span->nr_small_alloc;
         }
     }
@@ -1618,10 +1621,10 @@ small_pool::add_more_objects() {
 void
 small_pool::trim_free_list() {
     auto goal = (_min_free + _max_free) / 2;
-    while (_free && _free_count > goal) {
+    while (_free && free_count() > goal) {
         auto obj = _free;
         _free = _free->next;
-        --_free_count;
+        ++_free_room;
         page* span = cpu_mem.to_page(obj);
         span -= span->offset_in_span;
         if (!span->freelist) {
@@ -2278,7 +2281,7 @@ seastar::internal::log_buf::inserter_iterator do_dump_memory_diagnostics(seastar
         }
 
         // For the small pools, there are two types of free objects:
-        // Pool freelist objects are poitned to by sp._free and their count is sp._free_count
+        // Pool freelist objects are poitned to by sp._free and their count is sp.free_count()
         // Span freelist objects are those removed from the pool freelist when that list
         // becomes too large: they are instead attached to the spans allocated to this
         // pool. To count this second category, we iterate over the spans below.
@@ -2290,7 +2293,7 @@ seastar::internal::log_buf::inserter_iterator do_dump_memory_diagnostics(seastar
             span_freelist_objs += capacity_in_objects - span.nr_small_alloc;
             front = span.link._next;
         }
-        const auto free_objs = sp._free_count + span_freelist_objs; // pool + span free objects
+        const auto free_objs = sp.free_count() + span_freelist_objs; // pool + span free objects
         const auto use_count = sp._pages_in_use * page_size / sp.object_size() - free_objs;
         auto memory = sp._pages_in_use * page_size;
         const auto unused = free_objs * sp.object_size();
