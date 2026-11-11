@@ -1266,7 +1266,7 @@ struct no_size {};
 template <typename S>
 requires std::same_as<S, size_t> || std::same_as<S, no_size>
 [[gnu::noinline]]
-static void free_slowpath(void* obj, S size) {
+static void free_slowpath(void* obj, S size) noexcept {
     if (cpu_pages::is_local_pointer(obj)) {
         alloc_stats::increment_local(alloc_stats::types::frees);
         if constexpr (std::is_same_v<decltype(size), no_size>) {
@@ -1973,6 +1973,25 @@ inline void* allocate_aligned(size_t align, size_t size) {
 template <typename S = no_size>
 [[gnu::always_inline]]
 inline void free(void* obj, S size = {}) {
+#ifndef SEASTAR_HEAPPROF
+    if constexpr (std::is_same_v<S, size_t>) {
+        // With the size known, a local pointer goes straight onto the pool for
+        // that size, with no page lookup. The local check also rejects null and
+        // pointers from other shards, which free_slowpath() handles. (With heap
+        // profiling the page lookup is needed to find sampled objects, so sized
+        // frees take the unsized path.)
+        if (__builtin_expect(cpu_pages::is_local_pointer(obj) && size <= max_small_allocation, true)) {
+            auto idx = small_pool::size_to_idx(std::max(size, sizeof(free_object)));
+            alloc_stats::increment_local(alloc_stats::types::frees);
+            if (cpu_mem.small_pools[idx].push_free(obj)) {
+                small_pool::trim_class(idx);
+            }
+            return;
+        }
+        free_slowpath(obj, size);
+        return;
+    }
+#endif
     if (!__builtin_expect(cpu_pages::try_free_fastpath(obj), true)) {
         free_slowpath(obj, size);
     }
