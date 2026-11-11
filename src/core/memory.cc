@@ -89,6 +89,7 @@
 #ifndef SEASTAR_DEFAULT_ALLOCATOR
 #include <new>
 #include <array>
+#include <bit>
 #include <cstdint>
 #include <algorithm>
 #include <limits>
@@ -438,7 +439,10 @@ class small_pool {
         uint8_t preferred;
         uint8_t fallback;
     };
-    free_object* _free = nullptr;
+    // The pool's free objects, as a stack of pointers: _array[0, _free_count).
+    // Popping reads only the array, never the object being handed out.
+    // Allocated by init_array() on the first refill; null until then.
+    void** _array = nullptr;
     unsigned _object_size;
     span_sizes _span_sizes;
     unsigned _free_count = 0;
@@ -477,6 +481,7 @@ public:
 private:
     inline void* pop_free();
     [[gnu::noinline]] void* add_more_objects();
+    bool init_array();
     void trim_free_list();
     friend seastar::internal::log_buf::inserter_iterator do_dump_memory_diagnostics(seastar::internal::log_buf::inserter_iterator);
 };
@@ -541,7 +546,6 @@ constexpr small_pool::small_pool(unsigned object_size, bool is_sampled) noexcept
 
     _max_free = std::max<unsigned>(100, span_bytes() * 2 / _object_size);
     _min_free = _max_free / 2;
-    _free = nullptr;
 }
 
 template<bool sampled> // tag the pools in this array as sampled, see small_pool._sampled_pool
@@ -1522,10 +1526,7 @@ void cpu_pages::set_min_free_pages(size_t pages) {
  */
 void *
 small_pool::pop_free() {
-    auto* obj = _free;
-    _free = _free->next;
-    --_free_count;
-    return obj;
+    return _array[--_free_count];
 }
 
 // Should not throw in case of running out of memory to avoid infinite recursion,
@@ -1533,7 +1534,7 @@ small_pool::pop_free() {
 // falls back to the emergency pool in case malloc() returns nullptr.
 void*
 small_pool::allocate() {
-    return __builtin_expect((bool)_free, true) ? pop_free() : add_more_objects();
+    return __builtin_expect(_free_count != 0, true) ? pop_free() : add_more_objects();
 }
 
 /**
@@ -1546,22 +1547,42 @@ small_pool::allocate() {
  */
 void*
 small_pool::try_allocate() {
-    return __builtin_expect((bool)_free, true) ? pop_free() : nullptr;
+    return __builtin_expect(_free_count != 0, true) ? pop_free() : nullptr;
 }
 
 void
 small_pool::deallocate(void* object) {
-    auto o = reinterpret_cast<free_object*>(object);
-    o->next = _free;
-    _free = o;
-    ++_free_count;
+    _array[_free_count++] = object;
     if (_free_count >= _max_free) {
         trim_free_list();
     }
 }
 
+// A refill stops once the pool holds at least the trim goal, but it moves whole
+// spans, so it can overshoot the goal by up to one span's worth of objects
+// (spans are rounded up to a power of two pages). A free can then push one more
+// before trimming. Size the array for that, and put a pointer to itself in the
+// slot below _array[0], so that _array[-1] is always a valid address.
+bool
+small_pool::init_array() {
+    unsigned span_pages = std::bit_ceil(unsigned(std::max(_span_sizes.preferred, _span_sizes.fallback)));
+    unsigned span_objects = span_pages * page_size / _object_size;
+    size_t capacity = std::max(_max_free, (_min_free + _max_free) / 2 + span_objects);
+    auto nr_pages = ((capacity + 1) * sizeof(void*) + page_size - 1) / page_size;
+    auto mem = reinterpret_cast<void**>(cpu_mem.allocate_large(nr_pages, false));
+    if (!mem) {
+        return false;
+    }
+    mem[0] = mem;
+    _array = mem + 1;
+    return true;
+}
+
 void*
 small_pool::add_more_objects() {
+    if (!_array && !init_array()) [[unlikely]] {
+        return nullptr;
+    }
     auto goal = (_min_free + _max_free) / 2;
     while (!_span_list.empty() && _free_count < goal) {
         page& span = _span_list.front(cpu_mem.pages);
@@ -1569,9 +1590,7 @@ small_pool::add_more_objects() {
         while (span.freelist) {
             auto obj = span.freelist;
             span.freelist = span.freelist->next;
-            obj->next = _free;
-            _free = obj;
-            ++_free_count;
+            _array[_free_count++] = obj;
             ++span.nr_small_alloc;
         }
     }
@@ -1595,24 +1614,19 @@ small_pool::add_more_objects() {
         span->nr_small_alloc = 0;
         span->freelist = nullptr;
         for (size_t offset = 0; offset <= span_size * page_size - _object_size; offset += _object_size) {
-            auto h = reinterpret_cast<free_object*>(data + offset);
-            h->next = _free;
-            _free = h;
-            ++_free_count;
+            _array[_free_count++] = data + offset;
             ++span->nr_small_alloc;
         }
     }
 
-    return _free ? pop_free() : nullptr;
+    return _free_count ? pop_free() : nullptr;
 }
 
 void
 small_pool::trim_free_list() {
     auto goal = (_min_free + _max_free) / 2;
-    while (_free && _free_count > goal) {
-        auto obj = _free;
-        _free = _free->next;
-        --_free_count;
+    while (_free_count > goal) {
+        auto obj = reinterpret_cast<free_object*>(_array[--_free_count]);
         page* span = cpu_mem.to_page(obj);
         span -= span->offset_in_span;
         if (!span->freelist) {
@@ -2248,7 +2262,7 @@ seastar::internal::log_buf::inserter_iterator do_dump_memory_diagnostics(seastar
         }
 
         // For the small pools, there are two types of free objects:
-        // Pool freelist objects are poitned to by sp._free and their count is sp._free_count
+        // Pool free objects are the first sp._free_count entries of sp._array
         // Span freelist objects are those removed from the pool freelist when that list
         // becomes too large: they are instead attached to the spans allocated to this
         // pool. To count this second category, we iterate over the spans below.
