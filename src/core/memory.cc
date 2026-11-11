@@ -621,6 +621,14 @@ private:
             = make_pools(std::make_integer_sequence<unsigned, nr_small_pools>());
 public:
     small_pool& operator[](unsigned idx) { return _pools[idx]; }
+    /// A pool's byte offset in the array. Callers that know the size class at
+    /// compile time pass this rather than the index, so the callee indexes
+    /// with it unscaled.
+    static constexpr size_t offset_of(unsigned idx) { return idx * sizeof(small_pool); }
+    static constexpr unsigned index_of(size_t offset) { return offset / sizeof(small_pool); }
+    small_pool& at_offset(size_t offset) {
+        return *reinterpret_cast<small_pool*>(reinterpret_cast<char*>(_pools.data()) + offset);
+    }
 };
 
 static_assert(std::is_trivially_destructible_v<small_pool_array<false>>);
@@ -2006,9 +2014,10 @@ void *allocate_slowpath(size_t size) {
 /// so that the body of each of those functions will contain the full fast path
 /// fully inlined, and all of these variations will share the allocate_slowpath
 /// fallback, which is not inlined.
-/// allocate() for a size of at least sizeof(free_object).
+/// The fast path of allocate() for a size of at least sizeof(free_object).
+/// Returns nullptr if the allocation has to take allocate_slowpath().
 [[gnu::always_inline]]
-inline void* allocate_at_least_min(size_t size) {
+inline void* try_allocate_at_least_min(size_t size) {
     if (__builtin_expect(size <= max_small_allocation, true)) {
         // Note we don't check is_reactor_thread here: a thread which doesn't
         // use the seastar allocator has empty small pool allocation lists, so
@@ -2020,7 +2029,15 @@ inline void* allocate_at_least_min(size_t size) {
             return finish_small_allocation(ptr, size);
         }
     }
+    return nullptr;
+}
 
+/// allocate() for a size of at least sizeof(free_object).
+[[gnu::always_inline]]
+inline void* allocate_at_least_min(size_t size) {
+    if (auto ptr = try_allocate_at_least_min(size)) {
+        return ptr;
+    }
     return allocate_slowpath(size);
 }
 
@@ -2029,13 +2046,27 @@ inline void* allocate(size_t size) {
     return allocate_at_least_min(std::max(size, sizeof(free_object)));
 }
 
-/// allocate() for a small size whose size class is known.
+/// The size class of a small pool's offset in small_pool_array.
+static constexpr unsigned offset_class(size_t pool_offset) {
+    return small_pool_array<false>::index_of(pool_offset);
+}
+
+/// The fast path of allocate() for a small size whose size class is known,
+/// given as the pool's offset in small_pool_array. Returns nullptr if the
+/// allocation has to take allocate_class_slowpath().
 [[gnu::always_inline]]
-inline void* allocate_small_class(unsigned idx) {
-    if (auto ptr = cpu_mem.small_pools[idx].try_allocate()) {
-        return finish_small_allocation(ptr, small_pool::class_size(idx));
+inline void* try_allocate_small_class(size_t pool_offset) {
+    if (auto ptr = cpu_mem.small_pools.at_offset(pool_offset).try_allocate()) {
+        return finish_small_allocation(ptr, small_pool::class_size(offset_class(pool_offset)));
     }
-    return allocate_slowpath(small_pool::class_size(idx));
+    return nullptr;
+}
+
+/// allocate_slowpath() for the size class at pool_offset. Out of line, so
+/// that callers that know the size class do not compute a size for it.
+[[gnu::noinline, gnu::cold]] SEASTAR_ALLOC_NONNULL
+static void* allocate_class_slowpath(size_t pool_offset) {
+    return allocate_slowpath(small_pool::class_size(offset_class(pool_offset)));
 }
 
 // Adjust the size of an aligned allocation to something our small pools can
@@ -2127,12 +2158,13 @@ inline void free_sized_fast(void* obj, size_t size) {
     free_slowpath(obj, size);
 }
 
-/// Sized free without heap profiling, for a small size whose size class is known.
+/// Sized free without heap profiling, for a small size whose size class is
+/// known, given as the pool's offset in small_pool_array.
 [[gnu::always_inline]]
-inline void free_small_class(void* obj, unsigned idx) {
+inline void free_small_class(void* obj, size_t pool_offset) {
     if (__builtin_expect(cpu_pages::is_local_pointer(obj), true)) {
-        if (cpu_mem.small_pools[idx].push_free(obj)) {
-            small_pool_bookkeeping(idx);
+        if (cpu_mem.small_pools.at_offset(pool_offset).push_free(obj)) {
+            small_pool_bookkeeping(offset_class(pool_offset));
         }
         return;
     }
@@ -2665,7 +2697,7 @@ using namespace seastar::memory;
 
 // The sized entry points are inlined into their callers and only pick which
 // out-of-line function to call: with the size known at compile time, one that
-// takes the size class; with the size known to be at least
+// takes the size class (as its pool's offset in small_pool_array); with the size known to be at least
 // sizeof(free_object), one that skips rounding it up to that; otherwise the
 // general one.
 
@@ -2674,7 +2706,8 @@ template <typename Class, typename AtLeastMin, typename General>
 static inline auto dispatch_size(size_t size, Class by_class, AtLeastMin at_least_min, General general) {
     if (__builtin_constant_p(size)) {
         if (size <= max_small_allocation) {
-            return by_class(small_pool::size_to_idx(std::max(size, sizeof(free_object))));
+            return by_class(small_pool_array<false>::offset_of(
+                    small_pool::size_to_idx(std::max(size, sizeof(free_object)))));
         }
         return general(size);
     }
@@ -2685,11 +2718,14 @@ static inline auto dispatch_size(size_t size, Class by_class, AtLeastMin at_leas
 }
 
 [[gnu::noinline]]
-static void* malloc_class(unsigned idx) noexcept {
+static void* malloc_class(size_t pool_offset) noexcept {
     if (try_trigger_error_injector()) {
         return nullptr;
     }
-    return allocate_small_class(idx);
+    if (auto ptr = try_allocate_small_class(pool_offset)) {
+        return ptr;
+    }
+    return allocate_class_slowpath(pool_offset);
 }
 
 [[gnu::noinline]]
@@ -2720,8 +2756,8 @@ static void free_sized_ool(void* ptr, size_t size) noexcept {
 
 #ifndef SEASTAR_HEAPPROF
 [[gnu::noinline]]
-static void free_class(void* ptr, unsigned idx) noexcept {
-    free_small_class(ptr, idx);
+static void free_class(void* ptr, size_t pool_offset) noexcept {
+    free_small_class(ptr, pool_offset);
 }
 
 [[gnu::noinline]]
@@ -2734,7 +2770,7 @@ static void free_sized_at_least_min(void* ptr, size_t size) noexcept {
 static inline void dispatch_free_sized(void* ptr, size_t size) noexcept {
 #ifndef SEASTAR_HEAPPROF
     dispatch_size(size,
-        [ptr] (unsigned idx) { free_class(ptr, idx); },
+        [ptr] (size_t pool_offset) { free_class(ptr, pool_offset); },
         [ptr] (size_t s) { free_sized_at_least_min(ptr, s); },
         [ptr] (size_t s) { free_sized_ool(ptr, s); });
 #else
@@ -2990,22 +3026,45 @@ void* throw_if_null(void* ptr) {
     return ptr;
 }
 
+// The slow paths of the operator new functions below, with the std::bad_alloc
+// throw, shared and out of line so that the functions are only their fast
+// paths and a tail call.
+[[gnu::noinline, gnu::cold]]
+static void* new_slowpath(size_t size) {
+    return throw_if_null(allocate_slowpath(size));
+}
+
+[[gnu::noinline, gnu::cold]]
+static void* new_class_slowpath(size_t pool_offset) {
+    return throw_if_null(allocate_slowpath(small_pool::class_size(offset_class(pool_offset))));
+}
+
 [[gnu::noinline]]
-static void* new_class(unsigned idx) {
+static void* new_class(size_t pool_offset) {
     trigger_error_injector();
-    return throw_if_null(allocate_small_class(idx));
+    if (auto ptr = try_allocate_small_class(pool_offset)) {
+        return ptr;
+    }
+    return new_class_slowpath(pool_offset);
 }
 
 [[gnu::noinline]]
 static void* new_at_least_min(size_t size) {
     trigger_error_injector();
-    return throw_if_null(allocate_at_least_min(size));
+    if (auto ptr = try_allocate_at_least_min(size)) {
+        return ptr;
+    }
+    return new_slowpath(size);
 }
 
 [[gnu::noinline]]
 static void* new_ool(size_t size) {
     trigger_error_injector();
-    return throw_if_null(allocate(size));
+    size = std::max(size, sizeof(free_object));
+    if (auto ptr = try_allocate_at_least_min(size)) {
+        return ptr;
+    }
+    return new_slowpath(size);
 }
 
 extern "C++"
