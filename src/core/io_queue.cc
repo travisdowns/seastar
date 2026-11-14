@@ -34,6 +34,9 @@
 #include <seastar/util/integrated-length.hh>
 
 #include <seastar/core/file.hh>
+// DNM: for footprint measurement, SEASTAR_IO_QUEUE_NO_DISPATCH_CHECKPOINTS drops the per-poll
+// queue-length checkpoints, which iterate every priority class the queue ever saw.
+#define SEASTAR_IO_QUEUE_NO_DISPATCH_CHECKPOINTS 1
 #include <seastar/core/io_queue.hh>
 #include <seastar/core/io_intent.hh>
 #include <seastar/core/reactor.hh>
@@ -1128,11 +1131,13 @@ future<size_t> io_queue::submit_io_write(size_t len, internal::io_request req, i
 // This is far from ideal, but it's something.
 
 void io_queue::poll_io_queue() {
+#ifndef SEASTAR_IO_QUEUE_NO_DISPATCH_CHECKPOINTS
     for (auto& pc : _priority_classes) {
         if (pc) {
             pc->on_before_dispatch();
         }
     }
+#endif
 
     for (auto&& st : _streams) {
         st.out.maybe_replenish_capacity(st.replenish);
@@ -1167,11 +1172,13 @@ void io_queue::poll_io_queue() {
         // can't have resource-saving guarantees anyway.
     }
 
+#ifndef SEASTAR_IO_QUEUE_NO_DISPATCH_CHECKPOINTS
     for (auto& pc : _priority_classes) {
         if (pc) {
             pc->on_after_dispatch();
         }
     }
+#endif
 }
 
 void io_queue::submit_request(io_desc_read_write* desc, internal::io_request req) noexcept {
